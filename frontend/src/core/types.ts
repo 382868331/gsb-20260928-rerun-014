@@ -26,6 +26,8 @@ export interface UnitResult {
   status: UnitStatus;
   value: number | null;
   error?: string;
+  /** 结果被阻断时的完整依赖链（单元名，从根因到本单元），用于向用户展示。 */
+  chain?: string[];
   /** 该结果对应的表达式/输入指纹，用于判断结果是否与当前定义一致。 */
   revision: string;
 }

@@ -67,7 +67,12 @@ export function NotebookPage({ onEditUnit }: { onEditUnit: (id: string) => void 
                   {result?.status === "ok" ? (
                     <span className="ok-text">成功</span>
                   ) : result?.status === "error" ? (
-                    <span className="error-text" title={result.error}>{result.error}</span>
+                    <>
+                      <span className="error-text" title={result.error}>{result.error}</span>
+                      {result.chain && result.chain.length > 1 && (
+                        <div className="hint mono">阻断链：{result.chain.join(" → ")}</div>
+                      )}
+                    </>
                   ) : (
                     "待计算"
                   )}

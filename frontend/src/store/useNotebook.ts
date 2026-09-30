@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { ComputeUnit, Experiment, NotebookState } from "../core/types";
 import { cloneExperiment, emptyNotebook, loadNotebook, saveNotebook, uid } from "../core/storage";
 import { runGraph } from "../core/engine";
+import { extractReferences } from "../core/evaluator";
 
 let idCounter = 0;
 export function newUnitName(kind: ComputeUnit["kind"]): string {
@@ -23,7 +24,18 @@ function runExperiment(exp: Experiment, changedIds?: string[]): Experiment {
     ...exp,
     updatedAt: Date.now(),
     results: outcome.results,
-    executionOrder: outcome.order,
+    // 执行记录只保留实际完成的单元：失败/被阻断的单元不出现在记录中。
+    executionOrder: outcome.order.filter((id) => outcome.results[id]?.status === "ok"),
+  };
+}
+
+/** 重开时重校验：按当前单元定义重算，丢弃任何与定义不符的旧结果（含错误状态残留）。 */
+function revalidate(exp: Experiment): Experiment {
+  const outcome = runGraph(exp.units, undefined, {});
+  return {
+    ...exp,
+    results: outcome.results,
+    executionOrder: outcome.order.filter((id) => outcome.results[id]?.status === "ok"),
   };
 }
 
@@ -53,7 +65,14 @@ export const useNotebook = create<NotebookStore>((set, get) => {
   return {
     ...emptyNotebook(),
 
-    hydrate: () => set(loadNotebook()),
+    hydrate: () => {
+      const loaded = loadNotebook();
+      const experiments: NotebookState["experiments"] = {};
+      for (const [id, exp] of Object.entries(loaded.experiments)) {
+        experiments[id] = revalidate(exp);
+      }
+      set({ ...loaded, experiments });
+    },
 
     createExperiment: (name) => {
       const now = Date.now();
@@ -109,8 +128,17 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       const state = get();
       if (!state.activeId) return;
       const exp = state.experiments[state.activeId];
+      const removed = exp.units.find((u) => u.id === id);
+      if (!removed) return;
+      // 直接引用被删单元的公式成为失效点，从它们开始增量重算；
+      // 无关单元保留成功记录。若被删单元在环上，环随之断开，此前受阻的单元自动补算。
+      const orphaned = exp.units
+        .filter((u) => u.id !== id && u.kind === "formula" && extractReferences(u.expression ?? "").includes(removed.name))
+        .map((u) => u.id);
       const units = exp.units.filter((u) => u.id !== id);
-      const updated = runExperiment({ ...exp, units, results: {} });
+      const results = { ...exp.results };
+      delete results[id];
+      const updated = runExperiment({ ...exp, units, results }, orphaned);
       commit({ ...get(), experiments: { ...get().experiments, [updated.id]: updated } });
     },
 

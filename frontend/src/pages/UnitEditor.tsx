@@ -63,7 +63,12 @@ export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => v
           </p>
         )}
         {result?.status === "error" && (
-          <p className="error-text">执行失败：{result.error}（上一版结果已失效，不再作为当前值）</p>
+          <>
+            <p className="error-text">执行失败：{result.error}（上一版结果已失效，不再作为当前值）</p>
+            {result.chain && result.chain.length > 0 && (
+              <p className="hint mono">阻断依赖链：{result.chain.join(" → ")}</p>
+            )}
+          </>
         )}
         {(!result || result.status === "idle") && <p>待计算</p>}
       </div>

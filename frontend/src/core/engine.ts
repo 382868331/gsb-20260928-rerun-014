@@ -4,8 +4,8 @@ import { EvalError, evaluate, extractReferences } from "./evaluator";
 /** 单元定义指纹：输入或表达式变化都会改变，用于判定旧结果是否仍对应当前定义。 */
 export function unitRevision(unit: ComputeUnit): string {
   return unit.kind === "input"
-    ? `input:${unit.value ?? ""}`
-    : `formula:${unit.expression ?? ""}`;
+    ? `input:${unit.name}:${unit.value ?? ""}`
+    : `formula:${unit.name}:${unit.expression ?? ""}`;
 }
 
 export interface GraphBuild {
@@ -131,6 +131,36 @@ export interface RunOutcome {
   cycle: string[] | null;
 }
 
+/** 判断从 from 沿依赖（仅经过 scope 内节点）能否到达 target。 */
+function reachableWithin(from: string, target: string, graph: GraphBuild, scope: Set<string>): boolean {
+  const stack = (graph.deps.get(from) ?? []).filter((d) => scope.has(d));
+  const seen = new Set<string>();
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (id === target) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const d of graph.deps.get(id) ?? []) if (scope.has(d)) stack.push(d);
+  }
+  return false;
+}
+
+/** 为环成员生成从它出发回到它自己的引用路径（单元名），用于展示完整阻断链。 */
+function cyclePathFrom(start: string, graph: GraphBuild, members: Set<string>, units: ComputeUnit[]): string[] {
+  const nameOf = (id: string) => units.find((u) => u.id === id)?.name ?? id;
+  const path = [start];
+  let cur = start;
+  while (true) {
+    const next = (graph.deps.get(cur) ?? []).find((d) => members.has(d));
+    if (!next || next === start) break;
+    path.push(next);
+    cur = next;
+  }
+  const names = path.map(nameOf);
+  names.push(nameOf(start));
+  return names;
+}
+
 /**
  * 增量执行计算图。
  * @param changedIds 输入被修改的单元；省略表示全量执行。
@@ -151,14 +181,53 @@ export function runGraph(
 
   const affected = changedIds ? affectedDownstream(changedIds, graph) : new Set(units.map((u) => u.id));
 
-  // 环上所有节点都标记错误（无唯一拓扑位置，不能给出成功值）。
-  if (cycle) {
-    const names = cycle.map((id) => units.find((u) => u.id === id)?.name ?? id).join(" -> ");
-    for (const id of affected) {
-      const u = units.find((x) => x.id === id)!;
-      results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(u), error: `检测到引用环：${names}` };
+  // 环处理：失败只落在环成员及依赖环的下游，独立计算照常执行。
+  // remaining 是未进入拓扑次序的节点（环成员 + 环的下游）。
+  const inOrder = new Set(order);
+  const remaining = new Set(units.map((u) => u.id).filter((id) => !inOrder.has(id)));
+  if (remaining.size > 0) {
+    // 环成员：在 remaining 内沿依赖能回到自身。
+    const members = new Set<string>();
+    for (const id of remaining) {
+      if (reachableWithin(id, id, graph, remaining)) members.add(id);
     }
-    return { results, order, executed: order.filter((id) => affected.has(id)), cycle };
+    for (const id of members) {
+      const u = units.find((x) => x.id === id)!;
+      const chain = cyclePathFrom(id, graph, members, units);
+      results[id] = {
+        unitId: id,
+        status: "error",
+        value: null,
+        revision: unitRevision(u),
+        error: `检测到引用环：${chain.join(" -> ")}`,
+        chain,
+      };
+    }
+    // 环的下游：沿 remaining 内的依赖挂到已定位的失败上游，逐层展开（剩余部分成 DAG，必然收敛）。
+    const pending = [...remaining].filter((id) => !members.has(id));
+    let progress = true;
+    while (pending.length > 0 && progress) {
+      progress = false;
+      for (let i = pending.length - 1; i >= 0; i--) {
+        const id = pending[i];
+        const dep = (graph.deps.get(id) ?? []).find((d) => remaining.has(d));
+        const depResult = dep ? results[dep] : undefined;
+        if (!dep || !depResult || depResult.status !== "error") continue;
+        const u = units.find((x) => x.id === id)!;
+        const depName = units.find((x) => x.id === dep)!.name;
+        const chain = [...(depResult.chain ?? [depName]), u.name];
+        results[id] = {
+          unitId: id,
+          status: "error",
+          value: null,
+          revision: unitRevision(u),
+          error: `上游单元 "${depName}" 处于引用环中，本单元被阻断`,
+          chain,
+        };
+        pending.splice(i, 1);
+        progress = true;
+      }
+    }
   }
 
   const executed: string[] = [];
@@ -169,7 +238,7 @@ export function runGraph(
     const defErr = graph.definitionErrors.get(id);
 
     if (defErr) {
-      results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(unit), error: defErr };
+      results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(unit), error: defErr, chain: [unit.name] };
       continue;
     }
 
@@ -204,12 +273,14 @@ export function runGraph(
     const depFailure = (graph.deps.get(id) ?? []).find((d) => results[d]?.status === "error");
     if (depFailure) {
       const depUnit = units.find((u) => u.id === depFailure)!;
+      const depResult = results[depFailure];
       results[id] = {
         unitId: id,
         status: "error",
         value: null,
         revision: unitRevision(unit),
         error: `上游单元 "${depUnit.name}" 执行失败，本单元跳过`,
+        chain: [...(depResult.chain ?? [depUnit.name]), unit.name],
       };
       continue;
     }
@@ -235,5 +306,5 @@ export function runGraph(
     }
   }
 
-  return { results, order, executed, cycle: null };
+  return { results, order, executed, cycle };
 }

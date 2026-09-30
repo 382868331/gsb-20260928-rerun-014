@@ -99,6 +99,94 @@ describe("引用成环", () => {
     const { results } = runGraph(units);
     expect(results.a.error).toContain("不存在");
   });
+
+  it("环不连累独立计算，失败只落在环及其下游", () => {
+    const units = [
+      unit("a", "a", "formula", "b + 1"),
+      unit("b", "b", "formula", "a + 1"),
+      unit("c", "c", "formula", "a * 2"),
+      unit("x", "x", "input", "5"),
+      unit("y", "y", "formula", "x * 3"),
+    ];
+    const { results, cycle } = runGraph(units);
+    expect(cycle).not.toBeNull();
+    // 环成员与环的下游报错，且不带成功值。
+    for (const id of ["a", "b", "c"]) {
+      expect(results[id].status).toBe("error");
+      expect(results[id].value).toBeNull();
+    }
+    expect(results.c.error).toContain("环");
+    // 独立计算照常产出结果。
+    expect(results.x).toMatchObject({ status: "ok", value: 5 });
+    expect(results.y).toMatchObject({ status: "ok", value: 15 });
+  });
+
+  it("被阻断的结果带有完整依赖链", () => {
+    const units = [
+      unit("a", "a", "formula", "b + 1"),
+      unit("b", "b", "formula", "a + 1"),
+      unit("c", "c", "formula", "a * 2"),
+      unit("d", "d", "formula", "c + 1"),
+    ];
+    const { results } = runGraph(units);
+    expect(results.a.chain![0]).toBe("a");
+    expect(results.a.chain![results.a.chain!.length - 1]).toBe("a");
+    // d 的链从环出发、经过 c、到 d。
+    expect(results.d.chain!.slice(-2)).toEqual(["c", "d"]);
+    expect(results.d.chain!.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("断开环后局部恢复：只重算受阻部分，无关成功记录保留", () => {
+    const cyclic = [
+      unit("a", "a", "formula", "b + 1"),
+      unit("b", "b", "formula", "a + 1"),
+      unit("c", "c", "formula", "a * 2"),
+      unit("x", "x", "input", "5"),
+      unit("y", "y", "formula", "x * 3"),
+    ];
+    const blocked = runGraph(cyclic);
+    expect(blocked.results.c.status).toBe("error");
+
+    // 把 b 改成不依赖 a，环断开。
+    const fixed = cyclic.map((u) => (u.id === "b" ? { ...u, expression: "x + 1" } : u));
+    const healed = runGraph(fixed, ["b"], blocked.results);
+    expect(healed.cycle).toBeNull();
+    expect(healed.results.a).toMatchObject({ status: "ok", value: 7 });
+    expect(healed.results.b).toMatchObject({ status: "ok", value: 6 });
+    expect(healed.results.c).toMatchObject({ status: "ok", value: 14 });
+    // 无关单元未被重算，成功记录原样保留。
+    expect(healed.executed).not.toContain("x");
+    expect(healed.executed).not.toContain("y");
+    expect(healed.results.y).toMatchObject({ status: "ok", value: 15 });
+  });
+
+  it("删除环中单元后，幸存单元重算且不留旧成功预览", () => {
+    const cyclic = [
+      unit("a", "a", "formula", "b + 1"),
+      unit("b", "b", "formula", "a + 1"),
+      unit("x", "x", "input", "5"),
+    ];
+    const blocked = runGraph(cyclic);
+    // 删除 b：a 引用不到 b 报错，x 保持成功。
+    const remaining = cyclic.filter((u) => u.id !== "b");
+    const after = runGraph(remaining, ["a"], blocked.results);
+    expect(after.results.a.status).toBe("error");
+    expect(after.results.a.value).toBeNull();
+    expect(after.results.x).toMatchObject({ status: "ok", value: 5 });
+    expect(after.results.b).toBeUndefined();
+  });
+
+  it("改名后旧结果指纹失效，不残留指向旧定义的成功预览", () => {
+    const units = [unit("a", "a", "input", "5"), unit("f", "f", "formula", "a * 2")];
+    const first = runGraph(units);
+    expect(first.results.f.value).toBe(10);
+    const renamed = units.map((u) => (u.id === "a" ? { ...u, name: "g" } : u));
+    const second = runGraph(renamed, ["a"], first.results);
+    // f 引用的 a 不复存在，必须报错而不是沿用 10。
+    expect(second.results.f.status).toBe("error");
+    expect(second.results.f.value).toBeNull();
+    expect(second.results.a).toMatchObject({ status: "ok", value: 5 });
+  });
 });
 
 describe("中途报错与旧值失效", () => {

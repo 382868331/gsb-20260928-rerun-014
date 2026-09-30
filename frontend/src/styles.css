@@ -1,0 +1,52 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f5f6f8;
+  color: #1f2937;
+}
+.page { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+.hint { color: #6b7280; font-size: 13px; }
+.header-row { display: flex; align-items: center; gap: 12px; }
+.toolbar { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
+input, textarea {
+  padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 6px; font: inherit; background: #fff;
+}
+input[type="text"], .toolbar input { min-width: 200px; }
+button {
+  padding: 7px 12px; border: 1px solid #2563eb; background: #2563eb; color: #fff;
+  border-radius: 6px; cursor: pointer; font: inherit;
+}
+button:hover { opacity: 0.92; }
+button.danger { background: #dc2626; border-color: #dc2626; }
+.experiment-list { list-style: none; padding: 0; }
+.experiment-card {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+  padding: 14px 16px; margin-bottom: 10px;
+}
+.experiment-actions { display: flex; gap: 8px; }
+.experiment-actions button:first-child {
+  background: #fff; color: #2563eb;
+}
+.link {
+  background: none; border: none; color: #2563eb; padding: 0; cursor: pointer; font: inherit;
+}
+.meta { display: flex; gap: 12px; color: #6b7280; font-size: 12px; margin-top: 4px; }
+.unit-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+.unit-table th, .unit-table td {
+  text-align: left; padding: 10px 12px; border-bottom: 1px solid #eef0f3; font-size: 13px; vertical-align: top;
+}
+.unit-table th { background: #f0f3f8; font-weight: 600; }
+.row-error { background: #fef2f2; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.nowrap { white-space: nowrap; }
+.nowrap button { margin-right: 6px; padding: 4px 8px; font-size: 12px; }
+.ok-text { color: #16a34a; }
+.error-text { color: #dc2626; }
+.editor-form { display: grid; gap: 14px; background: #fff; padding: 18px; border-radius: 8px; border: 1px solid #e5e7eb; }
+.editor-form label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
+.editor-form input, .editor-form textarea { font-weight: 400; }
+.result-panel { margin-top: 16px; padding: 14px 16px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; }
+.result-error { background: #fef2f2; border-color: #fecaca; }

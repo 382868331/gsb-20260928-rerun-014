@@ -14,7 +14,10 @@ export function ExperimentList() {
   return (
     <div className="page">
       <h1>科研计算笔记本</h1>
-      <p className="hint">保存一次完整实验后，可从中分出不同参数的支线；各支线输入与结果独立保存。</p>
+      <p className="hint">
+        每本笔记本内可派生多组参数情景并排比较；情景各自保留结果、错误与依赖关系，
+        共享公式改版按情景逐个接受，保存重开后可追溯参数与公式版本。
+      </p>
       <form
         className="toolbar"
         onSubmit={(e) => {
@@ -29,7 +32,14 @@ export function ExperimentList() {
       <ul className="experiment-list">
         {list.map((exp) => {
           const parent = exp.parentId ? experiments[exp.parentId] : null;
-          const errorCount = Object.values(exp.results).filter((r) => r.status === "error").length;
+          const scenarioCount = exp.scenarioOrder.length;
+          const pendingCount = Object.values(exp.scenarios).filter(
+            (sc) => Object.keys(sc.pending).length > 0,
+          ).length;
+          const errorCount = Object.values(exp.scenarios).reduce(
+            (n, sc) => n + Object.values(sc.results).filter((r) => r.status === "error").length,
+            0,
+          );
           return (
             <li key={exp.id} className="experiment-card">
               <div className="experiment-main">
@@ -39,6 +49,8 @@ export function ExperimentList() {
                 <div className="meta">
                   {parent ? <span>分叉自：{parent.name}</span> : <span>根实验</span>}
                   <span>{exp.units.length} 个单元</span>
+                  <span>{scenarioCount} 个情景</span>
+                  {pendingCount > 0 && <span className="pending-badge">{pendingCount} 个情景有待处理改版</span>}
                   {errorCount > 0 && <span className="error-text">{errorCount} 个错误</span>}
                 </div>
               </div>
@@ -47,7 +59,7 @@ export function ExperimentList() {
                 <button
                   className="danger"
                   onClick={() => {
-                    if (confirm(`删除实验 "${exp.name}"？`)) removeExperiment(exp.id);
+                    if (confirm(`删除实验 “${exp.name}”？`)) removeExperiment(exp.id);
                   }}
                 >
                   删除

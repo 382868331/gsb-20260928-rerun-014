@@ -5,7 +5,7 @@ import { EvalError, evaluate, extractReferences } from "./evaluator";
 export function unitRevision(unit: ComputeUnit): string {
   return unit.kind === "input"
     ? `input:${unit.value ?? ""}`
-    : `formula:${unit.expression ?? ""}`;
+    : `formula:v${unit.version}:${unit.expression ?? ""}`;
 }
 
 export interface GraphBuild {
@@ -33,13 +33,11 @@ export function buildGraph(units: ComputeUnit[]): GraphBuild {
   for (const u of units) {
     if (u.name.trim() === "") {
       definitionErrors.set(u.id, "单元名称为空");
-      continue;
-    }
-    if (byName.has(u.name)) {
+    } else if (byName.has(u.name)) {
       definitionErrors.set(u.id, `单元名 "${u.name}" 重复`);
-      continue;
+    } else {
+      byName.set(u.name, u);
     }
-    byName.set(u.name, u);
   }
 
   for (const u of units) {
@@ -66,17 +64,69 @@ export function buildGraph(units: ComputeUnit[]): GraphBuild {
   return { byName, deps, dependents, definitionErrors };
 }
 
+/** Tarjan 强连通分量：大小 >1 的分量即为引用环（自引用在定义阶段已剔除自边）。 */
+export function findCycles(units: ComputeUnit[], graph: GraphBuild): string[][] {
+  let index = 0;
+  const indices = new Map<string, number>();
+  const lowlink = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const cycles: string[][] = [];
+
+  const strongConnect = (id: string) => {
+    indices.set(id, index);
+    lowlink.set(id, index);
+    index += 1;
+    stack.push(id);
+    onStack.add(id);
+
+    for (const dep of graph.deps.get(id) ?? []) {
+      if (!indices.has(dep)) {
+        strongConnect(dep);
+        lowlink.set(id, Math.min(lowlink.get(id)!, lowlink.get(dep)!));
+      } else if (onStack.has(dep)) {
+        lowlink.set(id, Math.min(lowlink.get(id)!, indices.get(dep)!));
+      }
+    }
+
+    if (lowlink.get(id) === indices.get(id)) {
+      const component: string[] = [];
+      let w: string;
+      do {
+        w = stack.pop()!;
+        onStack.delete(w);
+        component.push(w);
+      } while (w !== id);
+      if (component.length > 1) cycles.push(component);
+    }
+  };
+
+  for (const u of units) if (!indices.has(u.id)) strongConnect(u.id);
+  return cycles;
+}
+
+/** 环成员 id -> 环的名称描述。 */
+export function cycleMembership(units: ComputeUnit[], cycles: string[][]): Map<string, string> {
+  const nameOf = (id: string) => units.find((u) => u.id === id)?.name ?? id;
+  const map = new Map<string, string>();
+  for (const cyc of cycles) {
+    const desc = `${cyc.map(nameOf).join(" -> ")} -> ${nameOf(cyc[0])}`;
+    for (const id of cyc) map.set(id, desc);
+  }
+  return map;
+}
+
 /**
- * Kahn 拓扑排序。返回执行次序；若存在环，返回环上的单元 id 列表。
- * 菱形依赖中每个单元只出现一次，且其所有上游先于它执行。
+ * 可执行单元的 Kahn 拓扑次序。环成员及其被阻塞的下游不参与排序——
+ * 它们在计算图中没有唯一位置；独立单元照常排序执行，菱形汇点只出现一次。
  */
-export function topologicalOrder(
-  units: ComputeUnit[],
-  graph: GraphBuild,
-): { order: string[]; cycle: string[] | null } {
+export function topologicalOrder(units: ComputeUnit[], graph: GraphBuild, blocked: Set<string>): string[] {
+  const runnable = units.filter((u) => !blocked.has(u.id));
   const indegree = new Map<string, number>();
-  for (const u of units) indegree.set(u.id, graph.deps.get(u.id)?.length ?? 0);
-  const queue = units.filter((u) => (indegree.get(u.id) ?? 0) === 0).map((u) => u.id);
+  for (const u of runnable) {
+    indegree.set(u.id, (graph.deps.get(u.id) ?? []).filter((d) => !blocked.has(d)).length);
+  }
+  const queue = runnable.filter((u) => (indegree.get(u.id) ?? 0) === 0).map((u) => u.id);
   const order: string[] = [];
   const seen = new Set<string>();
 
@@ -86,28 +136,12 @@ export function topologicalOrder(
     seen.add(id);
     order.push(id);
     for (const dep of graph.dependents.get(id) ?? []) {
+      if (blocked.has(dep)) continue;
       indegree.set(dep, (indegree.get(dep) ?? 1) - 1);
       if ((indegree.get(dep) ?? 0) === 0) queue.push(dep);
     }
   }
-
-  if (order.length === units.length) return { order, cycle: null };
-
-  // 环定位：在剩余节点上沿依赖前进一步直到回到已访问节点。
-  const remaining = new Set(units.map((u) => u.id).filter((id) => !seen.has(id)));
-  const start = remaining.values().next().value as string;
-  const path: string[] = [];
-  const pos = new Map<string, number>();
-  let cur = start;
-  while (remaining.has(cur) && !pos.has(cur)) {
-    pos.set(cur, path.length);
-    path.push(cur);
- const next = (graph.deps.get(cur) ?? []).find((d) => remaining.has(d));
-    if (!next) break;
-    cur = next;
-  }
-  const cycle = pos.has(cur) ? path.slice(pos.get(cur)!) : path;
-  return { order, cycle };
+  return order;
 }
 
 /** 收集 changedIds 的全部下游（含自身），菱形汇点只出现一次。 */
@@ -125,16 +159,22 @@ export function affectedDownstream(changedIds: string[], graph: GraphBuild): Set
 
 export interface RunOutcome {
   results: Record<string, UnitResult>;
+  /** 可执行单元的拓扑次序（环及其下游不参与）。 */
   order: string[];
-  /** 本次真正求值的单元（受影响集合），按拓扑顺序。 */
+  /** 本次真正求值/判定的单元（revision 变化、旧错误待恢复、环与被阻塞者）。 */
   executed: string[];
+  /** 检测到的环成员（去重）。 */
   cycle: string[] | null;
+  cycleIds: Set<string>;
+  /** 因依赖环而被阻塞的下游 id（不含环成员）。 */
+  blockedIds: Set<string>;
 }
 
 /**
  * 增量执行计算图。
- * @param changedIds 输入被修改的单元；省略表示全量执行。
- * @param previous 上一轮结果。任何被重算的单元先清空旧值：失败不会残留旧成功值。
+ * 引用环只阻塞环成员及其下游；独立常量/分支照常计算。
+ * 断开环后，上一轮失败/阻塞的单元自动进入重算集，只恢复需要重算的部分；
+ * 沿用的成功结果必须 revision 与当前定义一致，旧成功值不会误接到新输入。
  */
 export function runGraph(
   units: ComputeUnit[],
@@ -142,76 +182,78 @@ export function runGraph(
   previous: Record<string, UnitResult> = {},
 ): RunOutcome {
   const graph = buildGraph(units);
-  const { order, cycle } = topologicalOrder(units, graph);
+  const cycles = findCycles(units, graph);
+  const membership = cycleMembership(units, cycles);
+  const cycleIds = new Set<string>(membership.keys());
+
+  // 环的全部下游（含多环、菱形汇点）被阻塞：沿 dependents 传播。
+  const blockedIds = affectedDownstream([...cycleIds], graph);
+  for (const id of cycleIds) blockedIds.delete(id);
+
+  const order = topologicalOrder(units, graph, new Set([...cycleIds, ...blockedIds]));
+
   const results: Record<string, UnitResult> = {};
   for (const u of units) {
     const old = previous[u.id];
     if (old) results[u.id] = { ...old };
   }
 
-  const affected = changedIds ? affectedDownstream(changedIds, graph) : new Set(units.map((u) => u.id));
-
-  // 环上所有节点都标记错误（无唯一拓扑位置，不能给出成功值）。
-  if (cycle) {
-    const names = cycle.map((id) => units.find((u) => u.id === id)?.name ?? id).join(" -> ");
-    for (const id of affected) {
-      const u = units.find((x) => x.id === id)!;
-      results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(u), error: `检测到引用环：${names}` };
-    }
-    return { results, order, executed: order.filter((id) => affected.has(id)), cycle };
+  // 受影响集合：编辑点的下游 + 结构上无法执行者 + 上一轮非成功者（断环后自动恢复）。
+  const affected = changedIds
+    ? affectedDownstream(changedIds, graph)
+    : new Set(units.map((u) => u.id));
+  for (const id of cycleIds) affected.add(id);
+  for (const id of blockedIds) affected.add(id);
+  for (const [id, old] of Object.entries(previous)) {
+    if (old.status !== "ok") affected.add(id);
   }
 
   const executed: string[] = [];
   const values = new Map<string, number>();
+  const unitById = new Map(units.map((u) => [u.id, u]));
+  const nameOf = (id: string) => unitById.get(id)?.name ?? id;
 
-  for (const id of order) {
-    const unit = units.find((u) => u.id === id)!;
+  const evaluateNode = (id: string) => {
+    const unit = unitById.get(id)!;
     const defErr = graph.definitionErrors.get(id);
-
     if (defErr) {
-      results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(unit), error: defErr };
-      continue;
+      results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(unit), errorKind: "definition", error: defErr };
+      executed.push(id);
+      return;
     }
 
-    // 未受影响且旧结果与当前定义一致：沿用，不重算。
     const old = previous[id];
-    if (!affected.has(id) && old && old.status === "ok" && old.revision === unitRevision(unit)) {
+    if (!affected.has(id) && old?.status === "ok" && old.revision === unitRevision(unit)) {
       values.set(id, old.value as number);
       results[id] = { ...old };
-      continue;
+      return;
     }
-
-    if (!affected.has(id)) {
-      // 依赖未变但旧结果不可用：仍需补算。
-      affected.add(id);
-    }
-
+    affected.add(id);
     executed.push(id);
 
     if (unit.kind === "input") {
       const raw = (unit.value ?? "").trim();
       const v = Number(raw);
       if (raw === "" || Number.isNaN(v) || !Number.isFinite(v)) {
-        results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(unit), error: raw === "" ? "输入为空" : `输入 "${raw}" 不是有效数字` };
+        results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(unit), errorKind: "eval", error: raw === "" ? "输入为空" : `输入 "${raw}" 不是有效数字` };
       } else {
         values.set(id, v);
         results[id] = { unitId: id, status: "ok", value: v, revision: unitRevision(unit) };
       }
-      continue;
+      return;
     }
 
-    // formula：先检查上游是否有失败；有则不做求值并继承定位。
     const depFailure = (graph.deps.get(id) ?? []).find((d) => results[d]?.status === "error");
     if (depFailure) {
-      const depUnit = units.find((u) => u.id === depFailure)!;
       results[id] = {
         unitId: id,
         status: "error",
         value: null,
         revision: unitRevision(unit),
-        error: `上游单元 "${depUnit.name}" 执行失败，本单元跳过`,
+        errorKind: "upstream",
+        error: `上游单元 "${nameOf(depFailure)}" 执行失败，本单元跳过`,
       };
-      continue;
+      return;
     }
 
     try {
@@ -230,10 +272,50 @@ export function runGraph(
         status: "error",
         value: null,
         revision: unitRevision(unit),
+        errorKind: "eval",
         error: e instanceof Error ? e.message : String(e),
       };
     }
+  };
+
+  // 1) 可执行部分按拓扑次序运行：独立单元不受引用环影响。
+  for (const id of order) evaluateNode(id);
+
+  // 2) 环成员：结构性错误，绝不产出数值。
+  for (const id of cycleIds) {
+    const unit = unitById.get(id)!;
+    results[id] = {
+      unitId: id,
+      status: "error",
+      value: null,
+      revision: unitRevision(unit),
+      errorKind: "cycle",
+      error: `检测到引用环：${membership.get(id)}`,
+    };
+    if (!executed.includes(id)) executed.push(id);
   }
 
-  return { results, order, executed, cycle: null };
+  // 3) 被环阻塞的下游：报告最近的环上源头或同样被阻塞的失败上游。
+  for (const id of blockedIds) {
+    const unit = unitById.get(id)!;
+    const cycleDep = (graph.deps.get(id) ?? []).find((d) => cycleIds.has(d));
+    const blockedDep = (graph.deps.get(id) ?? []).find((d) => blockedIds.has(d));
+    const source = cycleDep ?? blockedDep;
+    if (source) {
+      const why = cycleDep ? "处于引用环中" : "被引用环阻塞";
+      results[id] = {
+        unitId: id,
+        status: "error",
+        value: null,
+        revision: unitRevision(unit),
+        errorKind: "upstream",
+        error: `上游单元 "${nameOf(source)}" ${why}，本单元跳过`,
+      };
+    }
+    if (!executed.includes(id)) executed.push(id);
+  }
+
+  const cycleFlat = [...new Set(cycles.reduce<string[]>((acc, c) => acc.concat(c), []))];
+  return { results, order, executed, cycle: cycleFlat.length ? cycleFlat : null, cycleIds, blockedIds };
 }
+

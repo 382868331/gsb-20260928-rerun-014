@@ -6,6 +6,7 @@ body {
   color: #1f2937;
 }
 .page { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+.wide-page { max-width: 1280px; }
 h1 { font-size: 22px; margin: 0 0 8px; }
 .hint { color: #6b7280; font-size: 13px; }
 .header-row { display: flex; align-items: center; gap: 12px; }
@@ -20,6 +21,7 @@ button {
 }
 button:hover { opacity: 0.92; }
 button.danger { background: #dc2626; border-color: #dc2626; }
+button.secondary { background: #fff; color: #374151; border-color: #9ca3af; }
 .experiment-list { list-style: none; padding: 0; }
 .experiment-card {
   display: flex; justify-content: space-between; align-items: center;
@@ -50,3 +52,13 @@ button.danger { background: #dc2626; border-color: #dc2626; }
 .editor-form input, .editor-form textarea { font-weight: 400; }
 .result-panel { margin-top: 16px; padding: 14px 16px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; }
 .result-error { background: #fef2f2; border-color: #fecaca; }
+.scenario-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.scenario-tab { background: #fff; color: #2563eb; border-color: #bfdbfe; }
+.active-tab { background: #2563eb; color: #fff; }
+.preview-banner { padding: 10px 14px; border: 1px solid #93c5fd; background: #eff6ff; border-radius: 8px; color: #1d4ed8; font-size: 13px; }
+.preview-actions { display: flex; gap: 8px; margin: 0 0 12px; }
+.pending-dot { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px; background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 500; }
+.result-cell { min-width: 120px; }
+.param-pill { margin-top: 4px; color: #6b7280; font-size: 11px; }
+.scenario-table th, .scenario-table td { white-space: nowrap; }
+.scenario-table .mono { white-space: normal; min-width: 160px; }

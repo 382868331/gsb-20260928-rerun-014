@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cloneExperiment, loadNotebook, saveNotebook, STORAGE_KEY } from "./storage";
 import { runGraph } from "./engine";
+import { normalizeExperiment } from "./scenarios";
 import type { ComputeUnit, Experiment } from "./types";
 
 function makeExperiment(): Experiment {
@@ -9,7 +10,7 @@ function makeExperiment(): Experiment {
     { id: "b", name: "b", kind: "formula", expression: "a * 2" },
   ];
   const run = runGraph(units);
-  return {
+  return normalizeExperiment({
     id: "root",
     name: "根",
     parentId: null,
@@ -18,7 +19,7 @@ function makeExperiment(): Experiment {
     units,
     results: run.results,
     executionOrder: run.order,
-  };
+  } as Experiment);
 }
 
 describe("版本隔离", () => {

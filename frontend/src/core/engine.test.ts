@@ -99,6 +99,45 @@ describe("引用成环", () => {
     const { results } = runGraph(units);
     expect(results.a.error).toContain("不存在");
   });
+
+  it("引用环只阻塞环及依赖它的单元，独立计算继续完成", () => {
+    const units = [
+      unit("ind", "ind", "input", "7"),
+      unit("ok", "ok", "formula", "ind * 2"),
+      unit("a", "a", "formula", "b + 1"),
+      unit("b", "b", "formula", "a + 1"),
+      unit("down", "down", "formula", "a + ok"),
+    ];
+    const run = runGraph(units);
+    expect(run.cycle!.sort()).toEqual(["a", "b"]);
+    expect(run.results.ind.status).toBe("ok");
+    expect(run.results.ok.value).toBe(14);
+    expect(run.results.a.status).toBe("error");
+    expect(run.results.b.status).toBe("error");
+    expect(run.results.down.status).toBe("error");
+    expect(run.results.down.error).toContain("阻塞");
+    expect(run.order).toContain("ok");
+    expect(run.order).not.toContain("a");
+  });
+
+  it("断开环后仅恢复环和其下游，独立结果继续沿用", () => {
+    const cyclic = [
+      unit("ind", "ind", "input", "7"),
+      unit("ok", "ok", "formula", "ind * 2"),
+      unit("a", "a", "formula", "b + 1"),
+      unit("b", "b", "formula", "a + 1"),
+      unit("down", "down", "formula", "a + ok"),
+    ];
+    const failed = runGraph(cyclic);
+    const fixed = cyclic.map((u) => (u.id === "b" ? { ...u, expression: "1 + 1" } : u));
+    const healed = runGraph(fixed, ["b"], failed.results);
+    expect(healed.cycle).toBeNull();
+    expect(healed.executed.sort()).toEqual(["a", "b", "down"]);
+    expect(healed.results.ok.value).toBe(14);
+    expect(healed.results.b.value).toBe(2);
+    expect(healed.results.a.value).toBe(3);
+    expect(healed.results.down.value).toBe(17);
+  });
 });
 
 describe("中途报错与旧值失效", () => {

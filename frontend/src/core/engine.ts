@@ -110,6 +110,49 @@ export function topologicalOrder(
   return { order, cycle };
 }
 
+/** 找出所有真正位于环中的节点；环的下游不属于环，但会被阻塞。 */
+export function findCycleNodes(units: ComputeUnit[], graph: GraphBuild): string[] {
+  const indices = new Map<string, number>();
+  const low = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const cycles: string[][] = [];
+  let nextIndex = 0;
+
+  const visit = (id: string): void => {
+    indices.set(id, nextIndex);
+    low.set(id, nextIndex);
+    nextIndex += 1;
+    stack.push(id);
+    onStack.add(id);
+
+    for (const dep of graph.deps.get(id) ?? []) {
+      if (!indices.has(dep)) {
+        visit(dep);
+        low.set(id, Math.min(low.get(id)!, low.get(dep)!));
+      } else if (onStack.has(dep)) {
+        low.set(id, Math.min(low.get(id)!, indices.get(dep)!));
+      }
+    }
+
+    if (low.get(id) === indices.get(id)) {
+      const component: string[] = [];
+      let current = "";
+      do {
+        current = stack.pop()!;
+        onStack.delete(current);
+        component.push(current);
+      } while (current !== id);
+      if (component.length > 1 || (graph.deps.get(id) ?? []).includes(id)) cycles.push(component);
+    }
+  };
+
+  for (const unit of units) {
+    if (!indices.has(unit.id)) visit(unit.id);
+  }
+  return cycles.flat();
+}
+
 /** 收集 changedIds 的全部下游（含自身），菱形汇点只出现一次。 */
 export function affectedDownstream(changedIds: string[], graph: GraphBuild): Set<string> {
   const affected = new Set<string>();
@@ -129,6 +172,59 @@ export interface RunOutcome {
   /** 本次真正求值的单元（受影响集合），按拓扑顺序。 */
   executed: string[];
   cycle: string[] | null;
+  blockedIds: string[];
+}
+
+function provenRevision(
+  id: string,
+  graph: GraphBuild,
+  results: Record<string, UnitResult>,
+  units: ComputeUnit[],
+): string {
+  const unit = units.find((item) => item.id === id);
+  const own = unit ? unitRevision(unit) : "unknown";
+  const depKey = (graph.deps.get(id) ?? [])
+    .map((depId) => `${depId}:${results[depId]?.revision ?? "missing"}`)
+    .join("|");
+  return depKey ? `${own}<<${depKey}` : own;
+}
+
+function sealResult(
+  id: string,
+  graph: GraphBuild,
+  results: Record<string, UnitResult>,
+  units: ComputeUnit[],
+): void {
+  const result = results[id];
+  if (result) {
+    result.revision = provenRevision(id, graph, results, units);
+    result.dependencyIds = [...(graph.deps.get(id) ?? [])];
+  }
+}
+
+function canReuse(
+  id: string,
+  unit: ComputeUnit,
+  graph: GraphBuild,
+  previous: Record<string, UnitResult>,
+  results: Record<string, UnitResult>,
+  units: ComputeUnit[],
+): boolean {
+  const old = previous[id];
+  if (!old || old.status !== "ok" || old.revision === "") return false;
+  const ownRevision = unitRevision(unit);
+  if (old.revision === provenRevision(id, graph, results, units)) return true;
+  if (old.revision.includes("<<")) return false;
+  if (old.revision !== ownRevision) return false;
+  return (graph.deps.get(id) ?? []).every((depId) => {
+    const depUnit = units.find((item) => item.id === depId);
+    const depOld = previous[depId];
+    const depCurrent = results[depId];
+    const currentRevision = depUnit ? unitRevision(depUnit) : "";
+    return depUnit && depOld?.status === "ok" && depCurrent?.status === "ok" &&
+      (depOld.revision === depCurrent.revision ||
+        (depOld.revision === currentRevision && (depCurrent.revision === currentRevision || depCurrent.revision.startsWith(`${currentRevision}<<`))));
+  });
 }
 
 /**
@@ -142,7 +238,10 @@ export function runGraph(
   previous: Record<string, UnitResult> = {},
 ): RunOutcome {
   const graph = buildGraph(units);
-  const { order, cycle } = topologicalOrder(units, graph);
+  const { order } = topologicalOrder(units, graph);
+  const cycleNodes = findCycleNodes(units, graph);
+  const cycle = cycleNodes.length > 0 ? cycleNodes : null;
+  const blocked = cycle ? affectedDownstream(cycleNodes, graph) : new Set<string>();
   const results: Record<string, UnitResult> = {};
   for (const u of units) {
     const old = previous[u.id];
@@ -151,16 +250,6 @@ export function runGraph(
 
   const affected = changedIds ? affectedDownstream(changedIds, graph) : new Set(units.map((u) => u.id));
 
-  // 环上所有节点都标记错误（无唯一拓扑位置，不能给出成功值）。
-  if (cycle) {
-    const names = cycle.map((id) => units.find((u) => u.id === id)?.name ?? id).join(" -> ");
-    for (const id of affected) {
-      const u = units.find((x) => x.id === id)!;
-      results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(u), error: `检测到引用环：${names}` };
-    }
-    return { results, order, executed: order.filter((id) => affected.has(id)), cycle };
-  }
-
   const executed: string[] = [];
   const values = new Map<string, number>();
 
@@ -168,14 +257,17 @@ export function runGraph(
     const unit = units.find((u) => u.id === id)!;
     const defErr = graph.definitionErrors.get(id);
 
+    if (blocked.has(id)) continue;
+
     if (defErr) {
       results[id] = { unitId: id, status: "error", value: null, revision: unitRevision(unit), error: defErr };
+      sealResult(id, graph, results, units);
       continue;
     }
 
     // 未受影响且旧结果与当前定义一致：沿用，不重算。
     const old = previous[id];
-    if (!affected.has(id) && old && old.status === "ok" && old.revision === unitRevision(unit)) {
+    if (!affected.has(id) && canReuse(id, unit, graph, previous, results, units)) {
       values.set(id, old.value as number);
       results[id] = { ...old };
       continue;
@@ -197,6 +289,7 @@ export function runGraph(
         values.set(id, v);
         results[id] = { unitId: id, status: "ok", value: v, revision: unitRevision(unit) };
       }
+      sealResult(id, graph, results, units);
       continue;
     }
 
@@ -211,6 +304,7 @@ export function runGraph(
         revision: unitRevision(unit),
         error: `上游单元 "${depUnit.name}" 执行失败，本单元跳过`,
       };
+      sealResult(id, graph, results, units);
       continue;
     }
 
@@ -233,7 +327,31 @@ export function runGraph(
         error: e instanceof Error ? e.message : String(e),
       };
     }
+    sealResult(id, graph, results, units);
   }
 
-  return { results, order, executed, cycle: null };
+  if (cycle) {
+    const cycleNames = new Map(cycle.map((id) => {
+      const next = (graph.deps.get(id) ?? []).find((depId) => cycle.includes(depId));
+      return [id, units.find((u) => u.id === next)?.name ?? next];
+    }));
+    for (const id of blocked) {
+      const unit = units.find((u) => u.id === id)!;
+      const isCycleNode = cycle.includes(id);
+      const name = unit.name;
+      const nextName = cycleNames.get(id) ?? "";
+      results[id] = {
+        unitId: id,
+        status: "error",
+        value: null,
+        revision: unitRevision(unit),
+        error: isCycleNode
+          ? `检测到引用环：${name} -> ${nextName}`
+          : `依赖的单元位于引用环中，本单元阻塞`,
+      };
+      sealResult(id, graph, results, units);
+    }
+  }
+
+  return { results, order, executed, cycle, blockedIds: [...blocked] };
 }

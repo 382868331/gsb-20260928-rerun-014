@@ -29,7 +29,10 @@ export function ExperimentList() {
       <ul className="experiment-list">
         {list.map((exp) => {
           const parent = exp.parentId ? experiments[exp.parentId] : null;
-          const errorCount = Object.values(exp.results).filter((r) => r.status === "error").length;
+          const errorCount = exp.scenarioOrder.reduce(
+            (count, scenarioId) => count + Object.values(exp.scenarioResults[scenarioId] ?? {}).filter((r) => r.status === "error").length,
+            0,
+          );
           return (
             <li key={exp.id} className="experiment-card">
               <div className="experiment-main">
@@ -39,6 +42,7 @@ export function ExperimentList() {
                 <div className="meta">
                   {parent ? <span>分叉自：{parent.name}</span> : <span>根实验</span>}
                   <span>{exp.units.length} 个单元</span>
+                  <span>{exp.scenarioOrder.length} 个情景</span>
                   {errorCount > 0 && <span className="error-text">{errorCount} 个错误</span>}
                 </div>
               </div>

@@ -1,4 +1,5 @@
 import { useNotebook } from "../store/useNotebook";
+import { historicalExpression, scenarioFormulaVersion } from "../core/scenarios";
 
 export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => void }) {
   const experiment = useNotebook((s) => (s.activeId ? s.experiments[s.activeId!] : undefined));
@@ -18,6 +19,8 @@ export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => v
   const activeSc = experiment.activeScenarioId ? experiment.scenarios[experiment.activeScenarioId] : undefined;
   const result = activeSc?.results[unitId];
   const pending = activeSc?.pending[unitId];
+  const acceptedVersion = activeSc ? scenarioFormulaVersion(experiment, activeSc, unitId, "accepted") : unit.version;
+  const pendingVersion = activeSc?.pendingFormulaVersions?.[unitId] ?? unit.version;
 
   return (
     <div className="page">
@@ -70,7 +73,7 @@ export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => v
           {pending.status === "ok" ? (
             <p>
               新表达式预览结果（当前情景）：<strong className="mono">{pending.value}</strong>
-              ，旧版结果 {result?.status === "ok" ? <span className="mono">{result.value}</span> : "失败"} 仍保留，直到在笔记本页接受。
+              ，相对本情景已接受 v{acceptedVersion} 预览 v{pendingVersion}；旧版结果 {result?.status === "ok" ? <span className="mono">{result.value}</span> : "失败"} 仍保留，直到在笔记本页接受。
             </p>
           ) : (
             <p className="error-text">新表达式预览失败：{pending.error}；旧版结果继续保留。</p>
@@ -82,6 +85,9 @@ export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => v
         {result?.status === "ok" && (
           <p>
             当前已接受结果：<strong className="mono">{result.value}</strong>
+            {unit.kind === "formula" && (
+              <>（公式 v{acceptedVersion}：<span className="mono">{historicalExpression(experiment, unitId, acceptedVersion)}</span>）</>
+            )}
           </p>
         )}
         {result?.status === "error" && (

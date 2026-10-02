@@ -25,10 +25,47 @@ export function makeScenario(
     resultKeys: {},
     pending: {},
     pendingKeys: {},
+    pendingFormulaVersions: {},
+    pendingExecutionOrder: [],
+    pendingCycleUnitIds: [],
     acceptedFormulaVersions: {},
     executionOrder: [],
     cycleUnitIds: [],
   };
+}
+
+/** 记录公式的每个已产生表达式，保证未接受旧版本的情景在继续编辑参数时仍可计算。 */
+export function recordFormulaHistory(exp: Experiment, unitId: string, version: number, expression: string): void {
+  exp.formulaHistory ??= {};
+  exp.formulaHistory[unitId] ??= {};
+  exp.formulaHistory[unitId][version] = expression;
+}
+
+function restoreFormulaHistory(exp: Experiment): void {
+  exp.formulaHistory ??= {};
+  for (const unit of exp.units) {
+    if (unit.kind !== "formula") continue;
+    exp.formulaHistory[unit.id] ??= {};
+    exp.formulaHistory[unit.id][unit.version] = unit.expression ?? "";
+  }
+
+  for (const sc of Object.values(exp.scenarios)) {
+    sc.pendingFormulaVersions ??= {};
+    sc.pendingExecutionOrder ??= [];
+    sc.pendingCycleUnitIds ??= [];
+    const keys = [...Object.values(sc.resultKeys), ...Object.values(sc.pendingKeys).map((key) => key.replace(/^pn:/, ""))];
+    for (const key of keys) {
+      if (!key.startsWith("fo|")) continue;
+      const parts = key.split("|");
+      const unitId = parts[1];
+      const version = Number(parts[2]?.replace("v", ""));
+      const expression = parts[3];
+      if (unitId && Number.isInteger(version) && expression !== undefined) {
+        exp.formulaHistory[unitId] ??= {};
+        exp.formulaHistory[unitId][version] = expression;
+      }
+    }
+  }
 }
 
 /** 深拷贝实验，确保快照/支线与原实验完全隔离，后续改动互不影响。 */
@@ -122,6 +159,10 @@ function migrateV1(raw: unknown): NotebookState | null {
       };
       if (!legacy.units || exp.scenarios) continue;
       for (const u of legacy.units) if (u.version === undefined) u.version = 1;
+      exp.formulaHistory = {};
+      for (const u of legacy.units) {
+        if (u.kind === "formula") exp.formulaHistory[u.id] = { [u.version]: u.expression ?? "" };
+      }
       const sc = makeScenario("默认情景", {}, null, exp.createdAt);
       sc.executionOrder = legacy.executionOrder ?? [];
       exp.scenarios = { [sc.id]: sc };
@@ -149,7 +190,10 @@ export function loadNotebook(storage: Storage = localStorage): NotebookState {
     const raw = storage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as NotebookState;
-      if (parsed.experiments) return parsed;
+      if (parsed.experiments) {
+        for (const exp of Object.values(parsed.experiments)) restoreFormulaHistory(exp);
+        return parsed;
+      }
     }
     const legacy = storage.getItem(LEGACY_KEY);
     if (legacy) {
@@ -168,4 +212,3 @@ export function loadNotebook(storage: Storage = localStorage): NotebookState {
 export function saveNotebook(state: NotebookState, storage: Storage = localStorage): void {
   storage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
-

@@ -53,6 +53,12 @@ export interface Scenario {
   pending: Record<string, UnitResult>;
   /** pending 结果在结果仓中的暂存键（pn: 前缀）。 */
   pendingKeys: Record<string, string>;
+  /** 本次预览中各公式单元的目标版本；未列出的下游公式沿用自己的基线版本。 */
+  pendingFormulaVersions?: Record<string, number>;
+  /** 预览图的拓扑次序，不覆盖已接受图的来源信息。 */
+  pendingExecutionOrder?: string[];
+  /** 本次预览检测到的环。 */
+  pendingCycleUnitIds?: string[];
   /** 每个公式单元已接受的版本号；低于单元当前版本即存在待处理改版。 */
   acceptedFormulaVersions: Record<string, number>;
   /** 可执行单元的拓扑次序（环及其下游无唯一位置，不在其中）。 */
@@ -77,6 +83,8 @@ export interface Experiment {
   updatedAt: number;
   /** 共享单元定义（公式与版本对所有情景一致）。 */
   units: ComputeUnit[];
+  /** 公式历史表达式：unitId -> version -> expression，用于让旧情景继续按旧版计算。 */
+  formulaHistory?: Record<string, Record<number, string>>;
   scenarios: Record<string, Scenario>;
   scenarioOrder: string[];
   activeScenarioId: string | null;

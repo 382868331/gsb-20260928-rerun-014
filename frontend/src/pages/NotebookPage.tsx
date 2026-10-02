@@ -1,9 +1,26 @@
 import { useNotebook } from "../store/useNotebook";
-import { pendingUnitIds } from "../core/scenarios";
+import { historicalExpression, pendingUnitIds, scenarioFormulaVersion } from "../core/scenarios";
 import type { Experiment, Scenario, UnitResult } from "../core/types";
 
-function ResultCell({ result, pending }: { result?: UnitResult; pending?: UnitResult }) {
+function ResultCell({
+  result,
+  pending,
+  acceptedVersion,
+  pendingVersion,
+  baselineExpression,
+  previewExpression,
+}: {
+  result?: UnitResult;
+  pending?: UnitResult;
+  acceptedVersion: number;
+  pendingVersion?: number;
+  baselineExpression: string;
+  previewExpression: string;
+}) {
   if (pending) {
+    const source = pendingVersion && pendingVersion !== acceptedVersion
+      ? `v${acceptedVersion} → v${pendingVersion}`
+      : "上游变化";
     return (
       <div className="cell-pending">
         {pending.status === "ok" ? (
@@ -11,7 +28,8 @@ function ResultCell({ result, pending }: { result?: UnitResult; pending?: UnitRe
         ) : (
           <span className="error-text" title={pending.error}>{pending.error}</span>
         )}
-        <div className="pending-tag">新版本预览（待接受）</div>
+        <div className="pending-tag">相对本情景基线预览（{source}）</div>
+        <div className="hint mono">基线：{baselineExpression || "（空）"} → 预览：{previewExpression || "（空）"}</div>
       </div>
     );
   }
@@ -53,6 +71,8 @@ function ScenarioColumn({ exp, sc, active }: { exp: Experiment; sc: Scenario; ac
           const result = sc.results[unit.id];
           const pending = sc.pending[unit.id];
           const isPendingUnit = pendingIds.has(unit.id);
+          const acceptedVersion = scenarioFormulaVersion(exp, sc, unit.id, "accepted");
+          const pendingVersion = sc.pendingFormulaVersions?.[unit.id];
           return (
             <div
               key={unit.id}
@@ -67,13 +87,21 @@ function ScenarioColumn({ exp, sc, active }: { exp: Experiment; sc: Scenario; ac
                   onChange={(e) => updateScenarioParam(unit.id, e.target.value)}
                 />
               ) : (
-                <ResultCell result={result} pending={pending} />
+                <ResultCell
+                  result={result}
+                  pending={pending}
+                  acceptedVersion={acceptedVersion}
+                  pendingVersion={pendingVersion}
+                  baselineExpression={historicalExpression(exp, unit.id, acceptedVersion)}
+                  previewExpression={historicalExpression(exp, unit.id, pendingVersion ?? unit.version)}
+                />
               )}
               <div className="cell-meta">
                 {unit.kind === "formula" && (
                   <span className="hint">
                     {orderIndex.has(unit.id) ? `#${orderIndex.get(unit.id)! + 1}` : result?.errorKind === "cycle" ? "环中" : "阻塞"}
-                    {isPendingUnit && <span className="pending-badge"> · 公式 v{unit.version} 待处理</span>}
+                    <span> · 已接受 v{acceptedVersion}</span>
+                    {isPendingUnit && <span className="pending-badge"> · 最新 v{unit.version} 待处理</span>}
                   </span>
                 )}
               </div>

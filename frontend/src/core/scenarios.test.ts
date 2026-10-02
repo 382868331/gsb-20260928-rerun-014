@@ -8,8 +8,10 @@ import {
   effectiveUnits,
   isUnitPending,
   pendingUnitIds,
+  refreshPendingPreview,
   runScenario,
 } from "./scenarios";
+import { recordFormulaHistory } from "./storage";
 
 let n = 0;
 const u = (id: string, name: string, kind: "input" | "formula", body?: string): ComputeUnit => {
@@ -21,7 +23,9 @@ const u = (id: string, name: string, kind: "input" | "formula", body?: string): 
 
 function buildExperiment(): Experiment {
   const now = 1;
-  const units = [u("a", "a", "input", "1"), u("b", "b", "formula", "a * 2")];
+  const input = u("a", "a", "input", "1");
+  const formula = { ...u("b", "b", "formula", "a * 2"), version: 1 };
+  const units = [input, formula];
   const base: Scenario = makeScenario("基准", {}, null, now);
   const exp: Experiment = {
     id: "exp",
@@ -34,8 +38,12 @@ function buildExperiment(): Experiment {
     scenarioOrder: [base.id],
     activeScenarioId: base.id,
     resultStore: {},
+    formulaHistory: {},
   };
   for (const unit of units) if (unit.kind === "formula") base.acceptedFormulaVersions[unit.id] = unit.version;
+  for (const unit of units) {
+    if (unit.kind === "formula") recordFormulaHistory(exp, unit.id, unit.version, unit.expression ?? "");
+  }
   const run = runScenario(exp, base.id, "accepted");
   base.results = run.results;
   base.resultKeys = run.keys;
@@ -196,5 +204,148 @@ describe("结果仓内容寻址共享与情景删除", () => {
     // 删除最后一个引用后记录被回收。
     detachScenario(exp, baseId);
     expect(exp.resultStore[bKey]).toBeUndefined();
+  });
+});
+
+describe("连续公式版本与情景基线", () => {
+  it("部分接受后，未接受情景修改参数仍按自己的旧公式计算，预览另行更新", () => {
+    const exp = buildExperiment();
+    const baseId = exp.scenarioOrder[0];
+    const other = makeScenario("情景二", { a: "5" }, baseId, 4);
+    exp.scenarios[other.id] = other;
+    exp.scenarioOrder.push(other.id);
+    other.acceptedFormulaVersions.b = 1;
+    let run = runScenario(exp, other.id, "accepted");
+    other.results = run.results;
+    other.resultKeys = run.keys;
+
+    const b = exp.units.find((u) => u.id === "b")!;
+    b.expression = "a * 3";
+    b.version = 2;
+    recordFormulaHistory(exp, b.id, 2, b.expression);
+    for (const scId of exp.scenarioOrder) refreshPendingPreview(exp, scId, ["b"]);
+    acceptPending(exp, baseId);
+
+    other.params.a = "7";
+    run = runScenario(exp, other.id, "accepted", ["a"]);
+    other.results = run.results;
+    other.resultKeys = run.keys;
+
+    expect(other.results.b.value).toBe(14);
+    expect(other.results.b.revision).toContain("formula:v1");
+    expect(exp.scenarios[baseId].results.b.value).toBe(3);
+
+    refreshPendingPreview(exp, other.id, [], ["a"]);
+    expect(other.pending.b.value).toBe(21);
+    expect(other.pending.b.revision).toContain("formula:v2");
+  });
+
+  it("不同情景可停留在不同已接受版本，并分别预览更晚版本", () => {
+    const exp = buildExperiment();
+    const baseId = exp.scenarioOrder[0];
+    const slow = makeScenario("慢速情景", { a: "5" }, baseId, 5);
+    exp.scenarios[slow.id] = slow;
+    exp.scenarioOrder.push(slow.id);
+    slow.acceptedFormulaVersions.b = 1;
+    let run = runScenario(exp, slow.id, "accepted");
+    slow.results = run.results;
+    slow.resultKeys = run.keys;
+
+    const b = exp.units.find((u) => u.id === "b")!;
+    b.expression = "a * 3";
+    b.version = 2;
+    recordFormulaHistory(exp, b.id, 2, b.expression);
+    for (const scId of exp.scenarioOrder) refreshPendingPreview(exp, scId, ["b"]);
+    acceptPending(exp, baseId);
+
+    b.expression = "a * 4";
+    b.version = 3;
+    recordFormulaHistory(exp, b.id, 3, b.expression);
+    for (const scId of exp.scenarioOrder) refreshPendingPreview(exp, scId, ["b"]);
+
+    const base = exp.scenarios[baseId];
+    expect(base.results.b.value).toBe(3);
+    expect(base.pending.b.value).toBe(4);
+    expect(base.pendingFormulaVersions!.b).toBe(3);
+    expect(slow.results.b.value).toBe(10);
+    expect(slow.pending.b.value).toBe(20);
+    expect(slow.pendingFormulaVersions!.b).toBe(3);
+
+    acceptPending(exp, slow.id);
+    expect(slow.results.b.value).toBe(20);
+    expect(base.results.b.value).toBe(3);
+    expect(base.pending.b.value).toBe(4);
+  });
+
+  it("派生情景冻结派生时的参数与已接受公式，不随父情景后续接受而改版", () => {
+    const exp = buildExperiment();
+    const parentId = exp.scenarioOrder[0];
+    const parent = exp.scenarios[parentId];
+    const b = exp.units.find((u) => u.id === "b")!;
+    b.expression = "a * 3";
+    b.version = 2;
+    recordFormulaHistory(exp, b.id, 2, b.expression);
+    refreshPendingPreview(exp, parentId, ["b"]);
+
+    const child = makeScenario("派生情景", { ...parent.params }, parentId, 9);
+    child.acceptedFormulaVersions = { ...parent.acceptedFormulaVersions };
+    exp.scenarios[child.id] = child;
+    exp.scenarioOrder.push(child.id);
+    runScenario(exp, child.id, "accepted");
+    refreshPendingPreview(exp, child.id, [], [], true);
+
+    acceptPending(exp, parentId);
+    const childRun = runScenario(exp, child.id, "accepted");
+    expect(childRun.results.b.value).toBe(2);
+    expect(childRun.results.b.revision).toContain("formula:v1");
+    expect(exp.scenarios[parentId].results.b.value).toBe(3);
+    expect(child.pending.b.value).toBe(3);
+  });
+
+  it("成环版本和断环版本的成功/失败记录只接到选择对应版本的情景", () => {
+    const exp = buildExperiment();
+    const baseId = exp.scenarioOrder[0];
+    const slow = makeScenario("慢速情景", { a: "5" }, baseId, 6);
+    exp.scenarios[slow.id] = slow;
+    exp.scenarioOrder.push(slow.id);
+    slow.acceptedFormulaVersions.b = 1;
+    let run = runScenario(exp, slow.id, "accepted");
+    slow.results = run.results;
+    slow.resultKeys = run.keys;
+
+    const c = { ...u("c", "c", "formula", "b + 1"), version: 1 };
+    exp.units.push(c);
+    for (const sc of Object.values(exp.scenarios)) sc.acceptedFormulaVersions.c = c.version;
+    recordFormulaHistory(exp, c.id, c.version, c.expression!);
+    for (const scId of exp.scenarioOrder) {
+      const existing = runScenario(exp, scId, "accepted");
+      const sc = exp.scenarios[scId];
+      sc.results = existing.results;
+      sc.resultKeys = existing.keys;
+    }
+
+    const b = exp.units.find((u) => u.id === "b")!;
+    b.expression = "c + 1";
+    b.version = 2;
+    recordFormulaHistory(exp, b.id, 2, b.expression);
+    for (const scId of exp.scenarioOrder) refreshPendingPreview(exp, scId, ["b"]);
+    acceptPending(exp, baseId);
+    expect(exp.scenarios[baseId].results.b.status).toBe("error");
+    expect(exp.scenarios[baseId].results.b.errorKind).toBe("cycle");
+    expect(exp.scenarios[baseId].results.c.status).toBe("error");
+    expect(slow.results.b.value).toBe(10);
+    discardPending(exp, slow.id);
+
+    b.expression = "a * 3";
+    b.version = 3;
+    recordFormulaHistory(exp, b.id, 3, b.expression);
+    for (const scId of exp.scenarioOrder) refreshPendingPreview(exp, scId, ["b"]);
+    expect(exp.scenarios[baseId].results.b.status).toBe("error");
+    expect(slow.results.b.value).toBe(10);
+
+    acceptPending(exp, baseId);
+    expect(exp.scenarios[baseId].results.b.value).toBe(3);
+    expect(slow.results.b.value).toBe(10);
+    expect(slow.pending.b.value).toBe(15);
   });
 });

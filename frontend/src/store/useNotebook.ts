@@ -5,17 +5,16 @@ import {
   emptyNotebook,
   loadNotebook,
   makeScenario,
+  recordFormulaHistory,
   rebuildResultStore,
   saveNotebook,
   uid,
 } from "../core/storage";
-import { affectedDownstream, buildGraph } from "../core/engine";
 import {
   acceptPending as acceptScenarioPending,
   detachScenario,
   discardPending as discardScenarioPending,
-  effectiveUnits,
-  pendingUnitIds,
+  refreshPendingPreview,
   runScenario,
 } from "../core/scenarios";
 
@@ -100,6 +99,7 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         scenarioOrder: [sc.id],
         activeScenarioId: sc.id,
         resultStore: {},
+        formulaHistory: {},
       };
       const state = get();
       const next: NotebookState = {
@@ -135,6 +135,7 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       exp.units = [...exp.units, unit];
       if (kind === "formula") {
         for (const sc of Object.values(exp.scenarios)) sc.acceptedFormulaVersions[unit.id] = 1;
+        recordFormulaHistory(exp, unit.id, 1, unit.expression ?? "");
       }
       for (const scId of exp.scenarioOrder) refreshScenario(exp, scId, [unit.id]);
       exp.updatedAt = Date.now();
@@ -155,34 +156,17 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       exp.units = exp.units.map((u) => (u.id === id ? { ...u, ...patch, version: nextVersion } : u));
 
       if (formulaChanged) {
-        // 共享公式改版：所有情景先保留旧版结果，再生成 pending 预览。
-        const graph = buildGraph(effectiveUnits(exp, exp.scenarios[exp.scenarioOrder[0]]));
-        const downstream = affectedDownstream([id], graph);
+        recordFormulaHistory(exp, id, nextVersion, patch.expression ?? old.expression ?? "");
         for (const scId of exp.scenarioOrder) {
-          const sc = exp.scenarios[scId];
-          // 清掉上一轮未处理预览，重新预览最新公式。
-          for (const key of Object.values(sc.pendingKeys)) {
-            const rec = exp.resultStore[key];
-            if (rec) {
-              rec.refIds = rec.refIds.filter((x) => x !== scId);
-              if (rec.refIds.length === 0) delete exp.resultStore[key];
-            }
-          }
-          sc.pending = {};
-          sc.pendingKeys = {};
-          const run = runScenario(exp, scId, "pending", [...downstream]);
-          for (const uid2 of downstream) {
-            if (run.results[uid2]) {
-              sc.pending[uid2] = run.results[uid2];
-              sc.pendingKeys[uid2] = run.keys[uid2];
-            }
-          }
-          sc.executionOrder = run.order;
-          sc.cycleUnitIds = run.cycleUnitIds;
+          refreshPendingPreview(exp, scId, [id]);
         }
       } else {
         // 改名/备注等结构性编辑：失效的名称引用会在正式重算中定位。
-        for (const scId of exp.scenarioOrder) refreshScenario(exp, scId);
+        const structuralDefinitionChanged = patch.name !== undefined || (old.kind === "input" && patch.value !== undefined);
+        for (const scId of exp.scenarioOrder) {
+          refreshScenario(exp, scId);
+          if (structuralDefinitionChanged) refreshPendingPreview(exp, scId, [], [], true);
+        }
       }
       exp.updatedAt = Date.now();
       commit({ ...get(), experiments: { ...get().experiments } });
@@ -201,6 +185,7 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       if (value === defaultVal) delete sc.params[unitId];
       else sc.params[unitId] = value;
       refreshScenario(exp, scId, [unitId]);
+      refreshPendingPreview(exp, scId, [], [unitId], true);
       commit({ ...get(), experiments: { ...get().experiments } });
     },
 
@@ -212,7 +197,11 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       for (const sc of Object.values(exp.scenarios)) {
         delete sc.params[id];
         delete sc.acceptedFormulaVersions[id];
+        delete sc.pending[id];
+        delete sc.pendingKeys[id];
+        delete sc.pendingFormulaVersions?.[id];
       }
+      delete exp.formulaHistory?.[id];
       for (const scId of exp.scenarioOrder) refreshScenario(exp, scId);
       exp.updatedAt = Date.now();
       commit({ ...get(), experiments: { ...get().experiments } });
@@ -236,11 +225,12 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         base ? { ...base.params } : {},
         base?.id ?? null,
       );
+      if (base) sc.acceptedFormulaVersions = { ...base.acceptedFormulaVersions };
       exp.scenarios[sc.id] = sc;
       exp.scenarioOrder = [...exp.scenarioOrder, sc.id];
       exp.activeScenarioId = sc.id;
-      for (const u of exp.units) if (u.kind === "formula") sc.acceptedFormulaVersions[u.id] = u.version;
       refreshScenario(exp, sc.id);
+      refreshPendingPreview(exp, sc.id, [], [], true);
       exp.updatedAt = Date.now();
       commit({ ...get(), experiments: { ...get().experiments } });
       return sc.id;
@@ -333,5 +323,3 @@ export const useNotebook = create<NotebookStore>((set, get) => {
     active: () => (get().activeId ? get().experiments[get().activeId!] : undefined),
   };
 });
-
-

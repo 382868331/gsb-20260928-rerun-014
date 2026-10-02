@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { cloneExperiment, loadNotebook, rebuildResultStore, saveNotebook, STORAGE_KEY } from "./storage";
-import { makeScenario } from "./storage";
-import { runScenario } from "./scenarios";
+import { cloneExperiment, loadNotebook, makeScenario, rebuildResultStore, recordFormulaHistory, saveNotebook, STORAGE_KEY } from "./storage";
+import { refreshPendingPreview, runScenario } from "./scenarios";
 import type { ComputeUnit, Experiment } from "./types";
 
 function makeExperiment(): Experiment {
@@ -24,6 +23,7 @@ function makeExperiment(): Experiment {
     resultStore: {},
   };
   sc.acceptedFormulaVersions.b = 1;
+  recordFormulaHistory(exp, "b", 1, "a * 2");
   const run = runScenario(exp, sc.id, "accepted");
   sc.results = run.results;
   sc.resultKeys = run.keys;
@@ -86,6 +86,47 @@ describe("重开持久化与版本追溯", () => {
     expect(hi2.results.b.revision).toContain("formula:v1");
     expect(hi2.results.b.value).toBe(16);
     expect(exp2.scenarios[rootScId].results.b.value).toBe(6);
+  });
+
+  it("部分接受后保存重开，未接受情景继续用历史公式计算", () => {
+    const root = makeExperiment();
+    const rootScId = root.scenarioOrder[0];
+    const old = makeScenario("旧版情景", { a: "5" }, rootScId, 3);
+    root.scenarios[old.id] = old;
+    root.scenarioOrder.push(old.id);
+    old.acceptedFormulaVersions.b = 1;
+    let run = runScenario(root, old.id, "accepted");
+    old.results = run.results;
+    old.resultKeys = run.keys;
+
+    const b = root.units.find((u) => u.id === "b")!;
+    b.expression = "a * 3";
+    b.version = 2;
+    recordFormulaHistory(root, b.id, 2, b.expression);
+    refreshPendingPreview(root, rootScId, ["b"]);
+    refreshPendingPreview(root, old.id, ["b"]);
+    const accepted = root.scenarios[rootScId];
+    accepted.acceptedFormulaVersions.b = 2;
+    run = runScenario(root, rootScId, "accepted", ["b"]);
+    accepted.results = run.results;
+    accepted.resultKeys = run.keys;
+    accepted.pending = {};
+    accepted.pendingKeys = {};
+    accepted.pendingFormulaVersions = {};
+
+    saveNotebook({ experiments: { root }, rootId: "root", activeId: "root" }, localStorage);
+    const reloaded = loadNotebook(localStorage);
+    const exp = reloaded.experiments.root;
+    const oldReloaded = exp.scenarios[old.id];
+    oldReloaded.params.a = "7";
+    run = runScenario(exp, old.id, "accepted", ["a"]);
+    oldReloaded.results = run.results;
+    oldReloaded.resultKeys = run.keys;
+
+    expect(oldReloaded.results.b.value).toBe(14);
+    expect(oldReloaded.results.b.revision).toContain("formula:v1");
+    expect(exp.formulaHistory?.b?.[1]).toBe("a * 2");
+    expect(exp.formulaHistory?.b?.[2]).toBe("a * 3");
   });
 });
 

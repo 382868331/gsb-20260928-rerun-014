@@ -1,6 +1,16 @@
 export type UnitKind = "input" | "formula";
 
 /**
+ * 公式的一个已发布版本。共享公式每次改版都追加一条记录，
+ * 因此停留在旧已接受版本的情景仍能用当时的表达式计算，
+ * 结果可以追溯到精确的公式版本。
+ */
+export interface FormulaRevision {
+  version: number;
+  expression: string;
+}
+
+/**
  * 计算单元定义（被持久化的“输入侧”内容）。
  * input: value 是数字输入；formula: expression 引用其他单元名，如 a + b * 2。
  */
@@ -14,6 +24,8 @@ export interface ComputeUnit {
   expression?: string;
   /** 定义版本号：公式内容每次变更 +1，用于区分新旧结果并支持逐情景接受。 */
   version: number;
+  /** 公式的版本历史（仅 formula）：包含从首版到当前版本的全部表达式。 */
+  revisions?: FormulaRevision[];
   note?: string;
 }
 

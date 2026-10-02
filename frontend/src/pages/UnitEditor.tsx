@@ -1,4 +1,5 @@
 import { useNotebook } from "../store/useNotebook";
+import { acceptedUnit } from "../core/scenarios";
 
 export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => void }) {
   const experiment = useNotebook((s) => (s.activeId ? s.experiments[s.activeId!] : undefined));
@@ -18,6 +19,10 @@ export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => v
   const activeSc = experiment.activeScenarioId ? experiment.scenarios[experiment.activeScenarioId] : undefined;
   const result = activeSc?.results[unitId];
   const pending = activeSc?.pending[unitId];
+  const acceptedExpr = activeSc && unit.kind === "formula"
+    ? acceptedUnit(experiment, activeSc, unitId)?.expression
+    : undefined;
+  const baselineVersion = activeSc?.acceptedFormulaVersions[unitId] ?? unit.version;
 
   return (
     <div className="page">
@@ -69,12 +74,23 @@ export function UnitEditor({ unitId, onBack }: { unitId: string; onBack: () => v
         <div className="result-panel result-pending">
           {pending.status === "ok" ? (
             <p>
-              新表达式预览结果（当前情景）：<strong className="mono">{pending.value}</strong>
-              ，旧版结果 {result?.status === "ok" ? <span className="mono">{result.value}</span> : "失败"} 仍保留，直到在笔记本页接受。
+              新版本 v{unit.version} 预览结果（当前情景，相对于本情景已接受的 v{baselineVersion}）：
+              <strong className="mono">{pending.value}</strong>
+              ，已接受结果 {result?.status === "ok" ? <span className="mono">{result.value}</span> : "失败"} 仍保留，直到在笔记本页接受。
             </p>
           ) : (
             <p className="error-text">新表达式预览失败：{pending.error}；旧版结果继续保留。</p>
           )}
+        </div>
+      )}
+
+      {unit.kind === "formula" && (
+        <div className="result-panel">
+          <p className="hint">
+            当前情景参与计算的是已接受公式 <strong>v{baselineVersion}</strong>：
+            <span className="mono"> {acceptedExpr || "（空表达式）"}</span>
+            {baselineVersion < unit.version && "；全局最新版仅在上方预览，接受前不会改变结果。"}
+          </p>
         </div>
       )}
 

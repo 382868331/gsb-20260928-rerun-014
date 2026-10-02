@@ -91,5 +91,6 @@ button.ghost { background: #fff; color: #6b7280; border-color: #d1d5db; }
 .param-input { width: 100%; min-width: 0; padding: 4px 7px; font-size: 12px; }
 .param-input:disabled { background: #f3f4f6; color: #9ca3af; }
 .cell-meta { margin-top: 2px; }
+.cell-source { margin-top: 2px; font-size: 11px; color: #6b7280; overflow-wrap: anywhere; }
 .pending-bar { display: flex; gap: 6px; margin-top: 8px; }
 .result-pending { background: #fffbeb; border-color: #fcd34d; }

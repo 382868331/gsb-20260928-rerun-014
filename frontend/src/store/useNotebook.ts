@@ -9,13 +9,11 @@ import {
   saveNotebook,
   uid,
 } from "../core/storage";
-import { affectedDownstream, buildGraph } from "../core/engine";
 import {
   acceptPending as acceptScenarioPending,
   detachScenario,
   discardPending as discardScenarioPending,
-  effectiveUnits,
-  pendingUnitIds,
+  refreshPending,
   runScenario,
 } from "../core/scenarios";
 
@@ -131,6 +129,7 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         value: kind === "input" ? "0" : undefined,
         expression: kind === "formula" ? "" : undefined,
         version: 1,
+        revisions: kind === "formula" ? [{ version: 1, expression: "" }] : undefined,
       };
       exp.units = [...exp.units, unit];
       if (kind === "formula") {
@@ -152,34 +151,15 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       const formulaChanged = old.kind === "formula"
         && patch.expression !== undefined && patch.expression !== old.expression;
       const nextVersion = formulaChanged ? old.version + 1 : old.version;
-      exp.units = exp.units.map((u) => (u.id === id ? { ...u, ...patch, version: nextVersion } : u));
+      const revisions = formulaChanged
+        ? [...(old.revisions ?? [{ version: old.version, expression: old.expression ?? "" }]),
+           { version: nextVersion, expression: patch.expression! }]
+        : old.revisions;
+      exp.units = exp.units.map((u) => (u.id === id ? { ...u, ...patch, version: nextVersion, revisions } : u));
 
       if (formulaChanged) {
-        // 共享公式改版：所有情景先保留旧版结果，再生成 pending 预览。
-        const graph = buildGraph(effectiveUnits(exp, exp.scenarios[exp.scenarioOrder[0]]));
-        const downstream = affectedDownstream([id], graph);
-        for (const scId of exp.scenarioOrder) {
-          const sc = exp.scenarios[scId];
-          // 清掉上一轮未处理预览，重新预览最新公式。
-          for (const key of Object.values(sc.pendingKeys)) {
-            const rec = exp.resultStore[key];
-            if (rec) {
-              rec.refIds = rec.refIds.filter((x) => x !== scId);
-              if (rec.refIds.length === 0) delete exp.resultStore[key];
-            }
-          }
-          sc.pending = {};
-          sc.pendingKeys = {};
-          const run = runScenario(exp, scId, "pending", [...downstream]);
-          for (const uid2 of downstream) {
-            if (run.results[uid2]) {
-              sc.pending[uid2] = run.results[uid2];
-              sc.pendingKeys[uid2] = run.keys[uid2];
-            }
-          }
-          sc.executionOrder = run.order;
-          sc.cycleUnitIds = run.cycleUnitIds;
-        }
+        // 共享公式改版：每个情景保留自己已接受版本的结果，并基于自己的基线生成预览。
+        for (const scId of exp.scenarioOrder) refreshPending(exp, scId);
       } else {
         // 改名/备注等结构性编辑：失效的名称引用会在正式重算中定位。
         for (const scId of exp.scenarioOrder) refreshScenario(exp, scId);
@@ -212,6 +192,8 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       for (const sc of Object.values(exp.scenarios)) {
         delete sc.params[id];
         delete sc.acceptedFormulaVersions[id];
+        delete sc.pending[id];
+        delete sc.pendingKeys[id];
       }
       for (const scId of exp.scenarioOrder) refreshScenario(exp, scId);
       exp.updatedAt = Date.now();
@@ -231,16 +213,36 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       if (!state.activeId) return null;
       const exp = state.experiments[state.activeId];
       const base = exp.activeScenarioId ? exp.scenarios[exp.activeScenarioId] : null;
+      // 派生情景明确继承父情景当时的参数与“已接受”的公式版本及结果；
+      // 父情景后来接受更新不会改变它，未接受的新版以预览形式呈现供其自行决定。
       const sc = makeScenario(
         name?.trim() || `情景 ${exp.scenarioOrder.length + 1}`,
         base ? { ...base.params } : {},
         base?.id ?? null,
+        Date.now(),
+        base ? { ...base.acceptedFormulaVersions } : Object.fromEntries(
+          exp.units.filter((u) => u.kind === "formula").map((u) => [u.id, u.version]),
+        ),
       );
       exp.scenarios[sc.id] = sc;
       exp.scenarioOrder = [...exp.scenarioOrder, sc.id];
       exp.activeScenarioId = sc.id;
-      for (const u of exp.units) if (u.kind === "formula") sc.acceptedFormulaVersions[u.id] = u.version;
-      refreshScenario(exp, sc.id);
+      if (base) {
+        // 复用父情景已接受结果（内容寻址，共享同一批结果记录）。
+        for (const [unitId, result] of Object.entries(base.results)) {
+          sc.results[unitId] = { ...result };
+          const key = base.resultKeys[unitId];
+          if (key) {
+            sc.resultKeys[unitId] = key;
+            const rec = exp.resultStore[key];
+            if (rec && !rec.refIds.includes(sc.id)) rec.refIds.push(sc.id);
+          }
+        }
+        sc.executionOrder = [...base.executionOrder];
+        sc.cycleUnitIds = [...base.cycleUnitIds];
+      }
+      // 继承后若父情景未停留在最新版，新情景同样先看到相对自己基线的预览。
+      refreshPending(exp, sc.id);
       exp.updatedAt = Date.now();
       commit({ ...get(), experiments: { ...get().experiments } });
       return sc.id;
@@ -333,5 +335,3 @@ export const useNotebook = create<NotebookStore>((set, get) => {
     active: () => (get().activeId ? get().experiments[get().activeId!] : undefined),
   };
 });
-
-

@@ -1,13 +1,41 @@
-import type { CachedResult, ComputeUnit, Experiment, Scenario, UnitResult } from "./types";
-import { buildGraph, runGraph, unitRevision, type RunOutcome } from "./engine";
+import type { CachedResult, ComputeUnit, Experiment, FormulaRevision, Scenario, UnitResult } from "./types";
+import { affectedDownstream, buildGraph, runGraph, type RunOutcome } from "./engine";
 
-/** 情景物化后的单元：input 用情景参数覆盖，formula 共享定义不变。 */
-export function effectiveUnits(exp: Experiment, sc: Scenario): ComputeUnit[] {
-  return exp.units.map((u) =>
-    u.kind === "input" && Object.prototype.hasOwnProperty.call(sc.params, u.id)
-      ? { ...u, value: sc.params[u.id] }
-      : { ...u },
-  );
+/** 取公式某一已发布版本；历史缺失时用当前表达式补位（兼容旧持久化数据）。 */
+export function formulaAt(unit: ComputeUnit, version: number): FormulaRevision {
+  const found = unit.revisions?.find((r) => r.version === version);
+  return found ?? { version, expression: unit.expression ?? "" };
+}
+
+/**
+ * 情景物化后的单元：
+ * - target "accepted"：input 用情景参数覆盖；formula 用该情景已接受版本的表达式。
+ *   因此未接受改版的情景，参数重算/重开后仍按旧公式出结果。
+ * - target "pending"：formula 一律用全局最新表达式，用于生成预览（预览绝不回写正式结果）。
+ */
+export function effectiveUnits(exp: Experiment, sc: Scenario, target: "accepted" | "pending" = "accepted"): ComputeUnit[] {
+  return exp.units.map((u) => {
+    if (u.kind === "input") {
+      return Object.prototype.hasOwnProperty.call(sc.params, u.id)
+        ? { ...u, value: sc.params[u.id] }
+        : { ...u };
+    }
+    const acceptedVersion = sc.acceptedFormulaVersions[u.id] ?? u.version;
+    if (target === "pending" && acceptedVersion < u.version) {
+      // 该情景尚未接受的公式在预览中用最新版；已接受的仍用自己的基线版本。
+      return { ...u };
+    }
+    const rev = formulaAt(u, acceptedVersion);
+    return { ...u, version: rev.version, expression: rev.expression };
+  });
+}
+
+/** 情景中公式已接受但晚于/异于当前发布版时不做处理；返回该情景当前生效（已接受）的公式单元。 */
+export function acceptedUnit(exp: Experiment, sc: Scenario, unitId: string): ComputeUnit | undefined {
+  const unit = exp.units.find((u) => u.id === unitId);
+  if (!unit || unit.kind !== "formula") return unit;
+  const rev = formulaAt(unit, sc.acceptedFormulaVersions[unitId] ?? unit.version);
+  return { ...unit, version: rev.version, expression: rev.expression };
 }
 
 /**
@@ -53,9 +81,11 @@ export function runScenario(
   changedInputIds?: string[],
 ): ScenarioRun {
   const sc = exp.scenarios[scenarioId];
-  const units = effectiveUnits(exp, sc);
+  const units = effectiveUnits(exp, sc, target);
   const graph = buildGraph(units);
-  const prev = target === "accepted" ? sc.results : {};
+  // 预览是在情景自己的已接受基线上推演新版本：上游沿用基线结果，受影响公式才重算，
+  // 得到的是“相对于该情景自己的基线”的差异，而不是与全局最新值比较。
+  const prev = sc.results;
   const outcome: RunOutcome = runGraph(units, changedInputIds, prev);
 
   const idToUnit = new Map(units.map((u) => [u.id, u]));
@@ -95,21 +125,50 @@ export function runScenario(
 }
 
 /**
- * 接受整个情景的待处理改版：在新公式版本上做一次正式运行，结果仓按内容自动共享；
- * 旧正式结果与 pending 暂存均解除引用。部分接受的粒度是“情景”。
+ * 预览在情景自己的已接受基线上推演：把每个“晚于该情景基线”的公式视为编辑点，
+ * 其结果（含被新公式波及的下游）即为待接受预览；未改版公式继续沿用基线。
+ * 预览只写 pending 区，绝不触碰该情景的正式结果。
+ */
+export function refreshPending(exp: Experiment, scenarioId: string): void {
+  const sc = exp.scenarios[scenarioId];
+  // 先解除上一轮暂存引用。
+  for (const id of Object.keys(sc.pending)) release(exp.resultStore, sc.pendingKeys[id], scenarioId);
+  sc.pending = {};
+  sc.pendingKeys = {};
+
+  const changedIds = pendingUnitIds(exp, sc);
+  if (changedIds.length === 0) return;
+
+  const units = effectiveUnits(exp, sc, "pending");
+  const graph = buildGraph(units);
+  const affected = affectedDownstream(changedIds, graph);
+  const run = runScenario(exp, scenarioId, "pending", changedIds);
+  for (const id of affected) {
+    if (!run.results[id]) continue;
+    sc.pending[id] = run.results[id];
+    sc.pendingKeys[id] = run.keys[id];
+  }
+}
+
+/**
+ * 接受整个情景的待处理改版：在新公式版本上做一次完整正式运行，结果仓按内容自动共享；
+ * 不同版本的内容键不同，成功记录绝不会跨版本混接。旧正式结果与 pending 暂存均解除引用。
  */
 export function acceptPending(exp: Experiment, scenarioId: string): void {
   const sc = exp.scenarios[scenarioId];
-  const pendingIds = Object.keys(sc.pending);
-  for (const id of pendingIds) release(exp.resultStore, sc.pendingKeys[id], scenarioId);
+  if (pendingUnitIds(exp, sc).length === 0) return;
+  for (const id of Object.keys(sc.pending)) release(exp.resultStore, sc.pendingKeys[id], scenarioId);
   sc.pending = {};
   sc.pendingKeys = {};
-  const run = runScenario(exp, scenarioId, "accepted", pendingIds);
+  // 正式视图切到最新版本后，旧公式版本对应的 revision 全部失配，全量重算最稳妥。
+  sc.acceptedFormulaVersions = {};
+  for (const u of exp.units) if (u.kind === "formula") sc.acceptedFormulaVersions[u.id] = u.version;
+  const allIds = exp.units.map((u) => u.id);
+  const run = runScenario(exp, scenarioId, "accepted", allIds);
   sc.results = run.results;
   sc.resultKeys = run.keys;
   sc.executionOrder = run.order;
   sc.cycleUnitIds = run.cycleUnitIds;
-  for (const u of exp.units) if (u.kind === "formula") sc.acceptedFormulaVersions[u.id] = u.version;
 }
 
 /** 放弃待处理预览：只解除暂存记录引用，已接受结果不受影响。 */
@@ -144,4 +203,3 @@ export function isUnitPending(exp: Experiment, sc: Scenario, unitId: string): bo
 export function pendingUnitIds(exp: Experiment, sc: Scenario): string[] {
   return exp.units.filter((u) => isUnitPending(exp, sc, u.id)).map((u) => u.id);
 }
-

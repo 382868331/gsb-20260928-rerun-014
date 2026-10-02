@@ -8,12 +8,13 @@ export function uid(prefix = "id"): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** 新建情景：可携带参数覆盖，不复制结果（结果由运行后写入共享结果仓）。 */
+/** 新建情景：可携带参数覆盖与已接受公式版本（派生时继承父情景当时的版本）。 */
 export function makeScenario(
   name: string,
   params: Record<string, string>,
   parentId: string | null = null,
   createdAt = Date.now(),
+  acceptedFormulaVersions: Record<string, number> = {},
 ): Scenario {
   return {
     id: uid("sc"),
@@ -25,7 +26,7 @@ export function makeScenario(
     resultKeys: {},
     pending: {},
     pendingKeys: {},
-    acceptedFormulaVersions: {},
+    acceptedFormulaVersions: { ...acceptedFormulaVersions },
     executionOrder: [],
     cycleUnitIds: [],
   };
@@ -107,6 +108,29 @@ export function ensureDefaultScenario(exp: Experiment): string {
   return exp.activeScenarioId!;
 }
 
+/**
+ * 规范化持久化实验：为公式补齐版本历史。
+ * 旧数据（含存在 bug 的版本，只有版本号没有表达式历史）无法还原当时表达式时，
+ * 用当前表达式回填，但版本号不变——内容键仍按各自版本隔离，成功记录不会跨版本混接。
+ */
+export function normalizeExperiment(exp: Experiment): void {
+  for (const unit of exp.units) {
+    if (unit.kind !== "formula") continue;
+    if (!Array.isArray(unit.revisions)) unit.revisions = [];
+    const byVersion = new Map(unit.revisions.map((r) => [r.version, r]));
+    for (const sc of Object.values(exp.scenarios)) {
+      const pinned = sc.acceptedFormulaVersions[unit.id];
+      if (pinned !== undefined && !byVersion.has(pinned)) {
+        byVersion.set(pinned, { version: pinned, expression: unit.expression ?? "" });
+      }
+    }
+    if (!byVersion.has(unit.version)) {
+      byVersion.set(unit.version, { version: unit.version, expression: unit.expression ?? "" });
+    }
+    unit.revisions = [...byVersion.values()].sort((a, b) => a.version - b.version);
+  }
+}
+
 /** v1（单情景）数据迁移为 v2：共享定义 + 默认情景，旧结果按内容重新入仓。 */
 function migrateV1(raw: unknown): NotebookState | null {
   try {
@@ -149,12 +173,16 @@ export function loadNotebook(storage: Storage = localStorage): NotebookState {
     const raw = storage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as NotebookState;
-      if (parsed.experiments) return parsed;
+      if (parsed.experiments) {
+        for (const exp of Object.values(parsed.experiments)) normalizeExperiment(exp);
+        return parsed;
+      }
     }
     const legacy = storage.getItem(LEGACY_KEY);
     if (legacy) {
       const migrated = migrateV1(JSON.parse(legacy));
       if (migrated) {
+        for (const exp of Object.values(migrated.experiments)) normalizeExperiment(exp);
         saveNotebook(migrated, storage);
         return migrated;
       }
@@ -168,4 +196,3 @@ export function loadNotebook(storage: Storage = localStorage): NotebookState {
 export function saveNotebook(state: NotebookState, storage: Storage = localStorage): void {
   storage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
-

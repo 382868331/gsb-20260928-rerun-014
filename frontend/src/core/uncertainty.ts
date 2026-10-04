@@ -89,6 +89,11 @@ export function computeScenarioRanges(
   for (const id of cycleIds) reasons.set(id, `处于引用环：${membership.get(id)}`);
   for (const id of blockedIds) reasons.set(id, "上游处于引用环中，无法判断");
 
+  // 定义级错误（直接引用自身、重名、引用不存在等）：该情景当前接受版本即无法判断。
+  for (const [id, err] of graph.definitionErrors) {
+    if (!reasons.has(id)) reasons.set(id, `定义错误：${err}`);
+  }
+
   // 输入源：联合组 / 候选集 / 区间 / 确定值。
   const sources: ComboSource[] = [];
   const grouped = new Set<string>();

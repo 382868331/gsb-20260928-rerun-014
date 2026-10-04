@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { Experiment, InputConstraint, JointGroup, RangeReport, UnitRange } from "../core/types";
 import { compareScenarios, computeScenarioRanges, effectiveInputText } from "../core/uncertainty";
 import { pendingUnitIds } from "../core/scenarios";
@@ -234,7 +234,10 @@ function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
         </span>
         <button className="danger tiny" onClick={() => removeReport(report.id)}>删除</button>
       </div>
-      <p className="hint">公式版本：{versionText || "无"}；约束与联合观测已随报告快照保存。</p>
+      <p className="hint">
+        历史快照（保存时的公式版本：{versionText || "无"}）；约束与联合观测已随报告冻结，
+        后续改版或约束调整不影响本报告，也不代表当前结果。
+      </p>
       {open && (
         <RangeTable
           exp={{ ...exp, units: exp.units.map((u) => ({ ...u, name: report.unitNames[u.id] ?? u.name })) }}
@@ -255,19 +258,14 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
   const [compareA, setCompareA] = useState(exp.scenarioOrder[0] ?? "");
   const [compareB, setCompareB] = useState(exp.scenarioOrder[1] ?? exp.scenarioOrder[0] ?? "");
 
-  const accepted = useMemo(
-    () => (sc ? computeScenarioRanges(exp, scId, "accepted") : null),
-    [exp, sc, scId],
-  );
+  // 范围、边界组合与情景比较在每次渲染时按各情景实际接受的公式版本与输入约束重算：
+  // 接受/放弃改版、编辑约束或联合观测后必须立即同步失效，不能沿用旧区间。
+  const accepted = sc ? computeScenarioRanges(exp, scId, "accepted") : null;
   const hasPending = sc ? pendingUnitIds(exp, sc).length > 0 : false;
-  const pending = useMemo(
-    () => (sc && hasPending ? computeScenarioRanges(exp, scId, "pending") : null),
-    [exp, sc, scId, hasPending],
-  );
-  const comparisons = useMemo(
-    () => (compareA && compareB && compareA !== compareB ? compareScenarios(exp, compareA, compareB) : []),
-    [exp, compareA, compareB],
-  );
+  const pending = sc && hasPending ? computeScenarioRanges(exp, scId, "pending") : null;
+  const comparisons = compareA && compareB && compareA !== compareB
+    ? compareScenarios(exp, compareA, compareB)
+    : [];
 
   if (!sc) return null;
   const scenarios = exp.scenarioOrder.map((id) => exp.scenarios[id]).filter(Boolean);

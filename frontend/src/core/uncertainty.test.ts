@@ -161,6 +161,109 @@ describe("情景比较归因", () => {
   });
 });
 
+describe("接受改版后范围同步失效", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useNotebook.setState({ experiments: {}, rootId: null, activeId: null });
+  });
+
+  it("直接引用自身：明确无法判断并向下游传播", () => {
+    const { exp, sc } = makeExp([
+      input("a", "a", "1"),
+      formula("f", "f", "f + a"),
+      formula("g", "g", "f * 2"),
+    ]);
+    const { ranges } = computeScenarioRanges(exp, sc.id);
+    expect(ranges.f.status).toBe("indeterminate");
+    expect(ranges.f.reason).toContain("引用自身");
+    expect(ranges.f.min).toBeUndefined();
+    expect(ranges.g.status).toBe("indeterminate");
+    expect(ranges.g.reason).toContain("无法判断");
+  });
+
+  it("接受形成自引用的公式后：范围与比较同步失效，旧版情景保留有效范围，报告与重开不复活旧区间", () => {
+    const store = () => useNotebook.getState();
+    store().hydrate();
+    const expId = store().createExperiment("环实验");
+    const x1 = store().addUnit("input")!;
+    const x2 = store().addUnit("input")!;
+    const f = store().addUnit("formula")!;
+    const names = () => Object.fromEntries(store().active()!.units.map((u) => [u.id, u.name]));
+    store().updateUnit(f, { expression: `${names()[x1]} - ${names()[x2]}` });
+    store().acceptAllScenarioUpdates();
+    store().setJointGroups([{ id: "jg1", unitIds: [x1, x2], rows: [[1, 20], [3, 10]] }]);
+
+    const scId = store().active()!.activeScenarioId!;
+    const before = computeScenarioRanges(store().active()!, scId).ranges;
+    expect(before[f].status).toBe("proven");
+    expect(before[f].min).toBe(-19);
+    expect(before[f].max).toBe(-7);
+
+    // 保存历史报告（旧版本快照），再派生一个停留在旧版公式的情景。
+    store().saveRangeReport("accepted");
+    const otherId = store().addScenario("旧版情景")!;
+    store().selectScenario(scId);
+
+    // 改为自引用并仅在当前情景接受。
+    store().updateUnit(f, { expression: `${names()[f]} + ${names()[x1]}` });
+    store().acceptScenarioUpdate(scId);
+
+    const exp = store().active()!;
+    expect(exp.scenarios[scId].results[f].error).toContain("引用自身");
+    // 范围表同步失效：明确无法判断及原因，不再显示旧区间。
+    const after = computeScenarioRanges(exp, scId).ranges;
+    expect(after[f].status).toBe("indeterminate");
+    expect(after[f].reason).toContain("引用自身");
+    expect(after[f].min).toBeUndefined();
+    // 仍采用旧公式的情景继续保留有效范围。
+    const other = computeScenarioRanges(exp, otherId).ranges;
+    expect(other[f].status).toBe("proven");
+    expect(other[f].min).toBe(-19);
+    expect(other[f].max).toBe(-7);
+    // 情景比较按各情景实际接受的版本计算。
+    const [cmp] = compareScenarios(exp, scId, otherId);
+    expect(cmp.attribution).toBe("公式修订");
+    expect(cmp.detail).toContain("无法判断");
+    // 历史报告保持原样并标清原版本。
+    const report = exp.reports![0];
+    expect(report.formulaVersions[f]).toBe(2);
+    expect(report.ranges[f].status).toBe("proven");
+    expect(report.ranges[f].min).toBe(-19);
+
+    // 保存重开后不能重新显示失效区间。
+    const reloaded = loadNotebook();
+    const reExp = reloaded.experiments[expId];
+    const reRanges = computeScenarioRanges(reExp, scId).ranges;
+    expect(reRanges[f].status).toBe("indeterminate");
+    expect(reRanges[f].reason).toContain("引用自身");
+    const reOther = computeScenarioRanges(reExp, otherId).ranges;
+    expect(reOther[f].status).toBe("proven");
+    expect(reOther[f].min).toBe(-19);
+    expect(reExp.reports![0].ranges[f].status).toBe("proven");
+  });
+
+  it("除零与缺少联合观测：无法判断并给出原因，保存重开后不复活旧区间", () => {
+    const { exp: expZ, sc: scZ } = makeExp([input("x", "x", "0"), formula("f", "f", "10 / x")]);
+    scZ.inputConstraints = { x: { kind: "candidates", values: [0] } };
+    const { exp: expJ, sc: scJ } = makeExp([
+      input("a", "a", "0"),
+      input("b", "b", "0"),
+      formula("g", "g", "a + b"),
+    ]);
+    scJ.jointGroups = [{ id: "j1", unitIds: ["a", "b"], rows: [] }];
+    expJ.id = "e2";
+
+    saveNotebook({ experiments: { [expZ.id]: expZ, [expJ.id]: expJ }, rootId: expZ.id, activeId: expZ.id });
+    const loaded = loadNotebook();
+    const lz = computeScenarioRanges(loaded.experiments[expZ.id], scZ.id).ranges;
+    expect(lz.f.status).toBe("indeterminate");
+    expect(lz.f.reason).toContain("除数为零");
+    const lj = computeScenarioRanges(loaded.experiments[expJ.id], scJ.id).ranges;
+    expect(lj.g.status).toBe("indeterminate");
+    expect(lj.g.reason).toContain("无法判断");
+  });
+});
+
 describe("派生继承与持久化", () => {
   beforeEach(() => {
     localStorage.clear();

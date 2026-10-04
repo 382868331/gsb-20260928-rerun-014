@@ -1,6 +1,24 @@
 export type UnitKind = "input" | "formula";
 
 /**
+ * 输入约束：未设置时按确定值（参数覆盖或共享默认值）处理。
+ * candidates: 有限候选值，可枚举穷尽；interval: 连续区间，按 samples 个采样点估计（结果记为可能范围）。
+ */
+export type InputConstraint =
+  | { kind: "candidates"; values: number[] }
+  | { kind: "interval"; min: number; max: number; samples: number };
+
+/**
+ * 联合观测组：组内输入来自同一次观测，取值只能按行整体出现，
+ * 不能把互相关联的值任意拼成不存在的组合。rows 每列与 unitIds 顺序对应。
+ */
+export interface JointGroup {
+  id: string;
+  unitIds: string[];
+  rows: number[][];
+}
+
+/**
  * 计算单元定义（被持久化的“输入侧”内容）。
  * input: value 是数字输入；formula: expression 引用其他单元名，如 a + b * 2。
  */
@@ -43,8 +61,12 @@ export interface Scenario {
   name: string;
   parentId: string | null;
   createdAt: number;
-  /** 参数覆盖：input 单元 id -> 输入文本；未覆盖则使用共享默认值。 */
-  params: Record<string, string>;
+ /** 参数覆盖：input 单元 id -> 输入文本；未覆盖则使用共享默认值。 */
+ params: Record<string, string>;
+  /** 输入约束（区间/候选集）；派生情景继承派生时的约束，之后各自独立更新。 */
+  inputConstraints?: Record<string, InputConstraint>;
+  /** 联合观测组：声明哪些输入来自同一次联合观测。 */
+  jointGroups?: JointGroup[];
   /** 已接受的当前结果：unitId -> 结果（结果体内容寻址存放在实验级 resultStore）。 */
   results: Record<string, UnitResult>;
   /** 已接受结果对应的内容键，用于结果仓引用计数。 */
@@ -75,6 +97,46 @@ export interface CachedResult {
   refIds: string[];
 }
 
+/** 单个单元的范围结论。 */
+export interface UnitRange {
+  unitId: string;
+  /** proven=已证实（组合枚举穷尽）；possible=可能（含区间采样或被截断）；indeterminate=无法判断。 */
+  status: "proven" | "possible" | "indeterminate";
+  min?: number;
+  max?: number;
+  /** 取得下界/上界的真实输入组合（输入单元名 -> 取值）。 */
+  minWitness?: Record<string, number>;
+  maxWitness?: Record<string, number>;
+  /** 成功求值的组合数。 */
+  evaluated: number;
+  /** 求值失败（如除零）的组合数与原因。 */
+  failed: number;
+  failureReasons?: string[];
+  /** 无法判断时的原因（引用环 / 缺少联合观测 / 上游无法判断等）。 */
+  reason?: string;
+}
+
+/** 一次范围分析报告：按当时的输入约束与公式版本计算，保存后可独立解释。 */
+export interface RangeReport {
+  id: string;
+  name: string;
+  createdAt: number;
+  scenarioId: string;
+  scenarioName: string;
+  /** 分析视图：已接受基线或待接受预览。 */
+  target: "accepted" | "pending";
+  /** 分析时各公式单元使用的版本。 */
+  formulaVersions: Record<string, number>;
+  /** 分析时的输入约束与参数覆盖快照。 */
+  inputConstraints: Record<string, InputConstraint>;
+  jointGroups: JointGroup[];
+  params: Record<string, string>;
+  unitNames: Record<string, string>;
+  ranges: Record<string, UnitRange>;
+  totalCombos: number;
+  truncated: boolean;
+}
+
 export interface Experiment {
   id: string;
   name: string;
@@ -90,6 +152,8 @@ export interface Experiment {
   activeScenarioId: string | null;
   /** 实验级结果仓：内容键 -> 结果 + 引用情景。删除情景不破坏其他情景沿用的记录。 */
   resultStore: Record<string, CachedResult>;
+  /** 保存的范围分析报告：按保存时的输入约束与公式版本解释，后续修改不影响旧报告。 */
+  reports?: RangeReport[];
 }
 
 export interface NotebookState {

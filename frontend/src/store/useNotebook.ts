@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { ComputeUnit, Experiment, NotebookState } from "../core/types";
+import type { ComputeUnit, Experiment, InputConstraint, JointGroup, NotebookState } from "../core/types";
+import { buildRangeReport } from "../core/uncertainty";
 import {
   cloneExperiment,
   emptyNotebook,
@@ -52,6 +53,13 @@ interface NotebookStore extends NotebookState {
   updateUnit: (id: string, patch: Partial<ComputeUnit>) => void;
   /** 编辑当前情景的参数（input 覆盖），只影响该情景。 */
   updateScenarioParam: (unitId: string, value: string) => void;
+  /** 设置当前情景某输入的约束（候选集/区间）；null 表示恢复确定值。 */
+  setInputConstraint: (unitId: string, constraint: InputConstraint | null) => void;
+  /** 整体替换当前情景的联合观测组。 */
+  setJointGroups: (groups: JointGroup[]) => void;
+  /** 保存当前情景的范围分析报告（按当时的约束与公式版本快照）。 */
+  saveRangeReport: (target: "accepted" | "pending", name?: string) => string | null;
+  removeReport: (reportId: string) => void;
   removeUnit: (id: string) => void;
   recomputeAll: () => void;
   addScenario: (name?: string) => string | null;
@@ -189,6 +197,54 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       commit({ ...get(), experiments: { ...get().experiments } });
     },
 
+    setInputConstraint: (unitId, constraint) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      if (!scId) return;
+      const sc = exp.scenarios[scId];
+      if (!exp.units.some((u) => u.id === unitId && u.kind === "input")) return;
+      sc.inputConstraints ??= {};
+      if (constraint) sc.inputConstraints[unitId] = constraint;
+      else delete sc.inputConstraints[unitId];
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
+    setJointGroups: (groups) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      if (!scId) return;
+      exp.scenarios[scId].jointGroups = groups;
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
+    saveRangeReport: (target, name) => {
+      const state = get();
+      if (!state.activeId) return null;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      if (!scId) return null;
+      const report = buildRangeReport(exp, scId, target, name);
+      exp.reports ??= [];
+      exp.reports = [...exp.reports, report];
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+      return report.id;
+    },
+
+    removeReport: (reportId) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      exp.reports = (exp.reports ?? []).filter((r) => r.id !== reportId);
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
     removeUnit: (id) => {
       const state = get();
       if (!state.activeId) return;
@@ -196,6 +252,13 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       exp.units = exp.units.filter((u) => u.id !== id);
       for (const sc of Object.values(exp.scenarios)) {
         delete sc.params[id];
+        delete sc.inputConstraints?.[id];
+        sc.jointGroups = (sc.jointGroups ?? [])
+          .map((g) => {
+            const keep = g.unitIds.map((u, i) => (u === id ? -1 : i)).filter((i) => i >= 0);
+            return { ...g, unitIds: keep.map((i) => g.unitIds[i]), rows: g.rows.map((r) => keep.map((i) => r[i])) };
+          })
+          .filter((g) => g.unitIds.length > 0);
         delete sc.acceptedFormulaVersions[id];
         delete sc.pending[id];
         delete sc.pendingKeys[id];
@@ -224,6 +287,9 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         name?.trim() || `情景 ${exp.scenarioOrder.length + 1}`,
         base ? { ...base.params } : {},
         base?.id ?? null,
+        Date.now(),
+        base ? structuredClone(base.inputConstraints ?? {}) : {},
+        base ? structuredClone(base.jointGroups ?? []) : [],
       );
       if (base) sc.acceptedFormulaVersions = { ...base.acceptedFormulaVersions };
       exp.scenarios[sc.id] = sc;

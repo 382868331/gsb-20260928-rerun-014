@@ -1,4 +1,4 @@
-import type { ComputeUnit, Experiment, NotebookState, Scenario } from "./types";
+import type { ComputeUnit, Experiment, InputConstraint, JointGroup, NotebookState, Scenario } from "./types";
 import { runScenario } from "./scenarios";
 
 export const STORAGE_KEY = "sci-compute-notebook:v2";
@@ -14,6 +14,8 @@ export function makeScenario(
   params: Record<string, string>,
   parentId: string | null = null,
   createdAt = Date.now(),
+  inputConstraints: Record<string, InputConstraint> = {},
+  jointGroups: JointGroup[] = [],
 ): Scenario {
   return {
     id: uid("sc"),
@@ -21,6 +23,8 @@ export function makeScenario(
     parentId,
     createdAt,
     params,
+    inputConstraints,
+    jointGroups,
     results: {},
     resultKeys: {},
     pending: {},
@@ -43,6 +47,7 @@ export function recordFormulaHistory(exp: Experiment, unitId: string, version: n
 
 function restoreFormulaHistory(exp: Experiment): void {
   exp.formulaHistory ??= {};
+  exp.reports ??= [];
   for (const unit of exp.units) {
     if (unit.kind !== "formula") continue;
     exp.formulaHistory[unit.id] ??= {};
@@ -53,6 +58,8 @@ function restoreFormulaHistory(exp: Experiment): void {
     sc.pendingFormulaVersions ??= {};
     sc.pendingExecutionOrder ??= [];
     sc.pendingCycleUnitIds ??= [];
+    sc.inputConstraints ??= {};
+    sc.jointGroups ??= [];
     const keys = [...Object.values(sc.resultKeys), ...Object.values(sc.pendingKeys).map((key) => key.replace(/^pn:/, ""))];
     for (const key of keys) {
       if (!key.startsWith("fo|")) continue;

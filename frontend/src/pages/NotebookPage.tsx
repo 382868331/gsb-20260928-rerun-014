@@ -1,6 +1,7 @@
 import { useNotebook } from "../store/useNotebook";
 import { historicalExpression, pendingUnitIds, scenarioFormulaVersion } from "../core/scenarios";
 import type { Experiment, Scenario, UnitResult } from "../core/types";
+import { UncertaintyPanel } from "./UncertaintyPanel";
 
 function ResultCell({
   result,
@@ -189,6 +190,8 @@ export function NotebookPage({ onEditUnit }: { onEditUnit: (id: string) => void 
       </div>
 
       {experiment.units.length === 0 && <p className="hint">还没有单元，先添加一个输入单元。</p>}
+
+      {experiment.units.length > 0 && <UncertaintyPanel exp={experiment} />}
     </div>
   );
 }

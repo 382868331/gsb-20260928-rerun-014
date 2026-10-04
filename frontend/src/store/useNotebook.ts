@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ComputeUnit, Experiment, NotebookState } from "../core/types";
+import type { ComputeUnit, Experiment, InputConstraint, JointObservation, NotebookState } from "../core/types";
 import {
   cloneExperiment,
   emptyNotebook,
@@ -52,6 +52,10 @@ interface NotebookStore extends NotebookState {
   updateUnit: (id: string, patch: Partial<ComputeUnit>) => void;
   /** 编辑当前情景的参数（input 覆盖），只影响该情景。 */
   updateScenarioParam: (unitId: string, value: string) => void;
+  updateInputConstraint: (unitId: string, constraint: InputConstraint | null) => void;
+  addJointObservation: () => string | null;
+  updateJointObservation: (observationId: string, patch: Partial<JointObservation>) => void;
+  removeJointObservation: (observationId: string) => void;
   removeUnit: (id: string) => void;
   recomputeAll: () => void;
   addScenario: (name?: string) => string | null;
@@ -189,6 +193,55 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       commit({ ...get(), experiments: { ...get().experiments } });
     },
 
+    updateInputConstraint: (unitId, constraint) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      if (!exp.activeScenarioId) return;
+      const unit = exp.units.find((u) => u.id === unitId && u.kind === "input");
+      const sc = exp.scenarios[exp.activeScenarioId];
+      if (!unit || !sc) return;
+      sc.inputConstraints ??= {};
+      if (constraint) sc.inputConstraints[unitId] = constraint;
+      else delete sc.inputConstraints[unitId];
+      if (constraint?.mode === "point") sc.params[unitId] = constraint.text;
+      else delete sc.params[unitId];
+      refreshScenario(exp, sc.id);
+      refreshPendingPreview(exp, sc.id, [], [], true);
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
+    addJointObservation: () => {
+      const state = get();
+      if (!state.activeId || !state.experiments[state.activeId].activeScenarioId) return null;
+      const exp = state.experiments[state.activeId];
+      const sc = exp.scenarios[exp.activeScenarioId!];
+      sc.jointObservations ??= [];
+      const observation: JointObservation = { id: uid("obs"), name: `观测 ${sc.jointObservations.length + 1}`, values: {} };
+      sc.jointObservations.push(observation);
+      commit({ ...get(), experiments: { ...get().experiments } });
+      return observation.id;
+    },
+
+    updateJointObservation: (observationId, patch) => {
+      const state = get();
+      if (!state.activeId || !state.experiments[state.activeId].activeScenarioId) return;
+      const exp = state.experiments[state.activeId];
+      const sc = exp.scenarios[exp.activeScenarioId!];
+      const observation = sc.jointObservations?.find((item) => item.id === observationId);
+      if (!observation) return;
+      Object.assign(observation, patch);
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
+    removeJointObservation: (observationId) => {
+      const state = get();
+      if (!state.activeId || !state.experiments[state.activeId].activeScenarioId) return;
+      const sc = state.experiments[state.activeId].scenarios[state.experiments[state.activeId].activeScenarioId!];
+      sc.jointObservations = (sc.jointObservations ?? []).filter((item) => item.id !== observationId);
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
     removeUnit: (id) => {
       const state = get();
       if (!state.activeId) return;
@@ -196,6 +249,12 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       exp.units = exp.units.filter((u) => u.id !== id);
       for (const sc of Object.values(exp.scenarios)) {
         delete sc.params[id];
+        delete sc.inputConstraints?.[id];
+        sc.jointObservations = (sc.jointObservations ?? []).map((obs) => {
+          const values = { ...obs.values };
+          delete values[id];
+          return { ...obs, values };
+        });
         delete sc.acceptedFormulaVersions[id];
         delete sc.pending[id];
         delete sc.pendingKeys[id];
@@ -225,7 +284,11 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         base ? { ...base.params } : {},
         base?.id ?? null,
       );
-      if (base) sc.acceptedFormulaVersions = { ...base.acceptedFormulaVersions };
+      if (base) {
+        sc.acceptedFormulaVersions = { ...base.acceptedFormulaVersions };
+        sc.inputConstraints = structuredClone(base.inputConstraints ?? {});
+        sc.jointObservations = structuredClone(base.jointObservations ?? []);
+      }
       exp.scenarios[sc.id] = sc;
       exp.scenarioOrder = [...exp.scenarioOrder, sc.id];
       exp.activeScenarioId = sc.id;

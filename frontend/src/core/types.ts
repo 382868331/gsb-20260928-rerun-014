@@ -19,6 +19,41 @@ export interface ComputeUnit {
 
 export type UnitStatus = "idle" | "ok" | "error";
 
+export type InputConstraintMode = "point" | "finite" | "interval";
+
+export interface InputConstraint {
+  mode: InputConstraintMode;
+  /** point: 数字；finite: 逗号分隔候选；interval: min..max。 */
+  text: string;
+}
+
+export interface JointObservation {
+  id: string;
+  name: string;
+  /** 同一次联合观测中必须共同出现的输入值：inputId -> 数字文本。 */
+  values: Record<string, string>;
+}
+
+export interface RangeWorld {
+  label: string;
+  values: Record<string, number>;
+}
+
+export type RangeStatus = "proven" | "possible" | "unknown";
+export type RangeUnknownKind = "cycle" | "division" | "eval" | "relation" | "definition" | "upstream";
+
+export interface UnitRange {
+  unitId: string;
+  status: RangeStatus;
+  min: number | null;
+  max: number | null;
+  minWorld?: RangeWorld;
+  maxWorld?: RangeWorld;
+  worldCount: number;
+  unknownKinds: RangeUnknownKind[];
+  reasons: string[];
+}
+
 /**
  * 单元结果（“输出侧”内容）。失败时 status=error 且 value 为空，
  * 绝不能继续把上一版成功值当作当前值。
@@ -45,6 +80,10 @@ export interface Scenario {
   createdAt: number;
   /** 参数覆盖：input 单元 id -> 输入文本；未覆盖则使用共享默认值。 */
   params: Record<string, string>;
+  /** 输入不确定性约束；未配置时按 params/共享默认值的单一确定值处理。 */
+  inputConstraints?: Record<string, InputConstraint>;
+  /** 联合观测行；行内值不能与其他行任意交叉拼接。 */
+  jointObservations?: JointObservation[];
   /** 已接受的当前结果：unitId -> 结果（结果体内容寻址存放在实验级 resultStore）。 */
   results: Record<string, UnitResult>;
   /** 已接受结果对应的内容键，用于结果仓引用计数。 */

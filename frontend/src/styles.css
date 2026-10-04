@@ -93,3 +93,53 @@ button.ghost { background: #fff; color: #6b7280; border-color: #d1d5db; }
 .cell-meta { margin-top: 2px; }
 .pending-bar { display: flex; gap: 6px; margin-top: 8px; }
 .result-pending { background: #fffbeb; border-color: #fcd34d; }
+
+.range-panel {
+  margin-top: 18px;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+.range-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.range-input {
+  display: grid;
+  grid-template-columns: 70px 92px 1fr;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}
+.range-input input, .observation-row input { min-width: 0; }
+.observation-row {
+  display: grid;
+  grid-template-columns: 120px repeat(var(--input-count, 1), minmax(90px, 1fr)) auto;
+  gap: 6px;
+  margin: 8px 0;
+}
+.range-table {
+  width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.range-table th, .range-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef0f3;
+}
+.range-table th { background: #f8fafc; }
+.range-badge {
+  margin-top: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  display: inline-block;
+}
+.range-proven { background: #dcfce7; color: #166534; }
+.range-possible { background: #fef3c7; color: #92400e; }
+.range-unknown { background: #fee2e2; color: #991b1b; }

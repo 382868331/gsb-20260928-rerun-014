@@ -123,6 +123,35 @@ describe("求值失败与循环", () => {
     expect(pending.ranges.p.reason).toContain("引用环");
     expect(pending.ranges.q.status).toBe("indeterminate");
   });
+
+  it("接受自引用公式版本后：该情景范围无法判断并说明直接自引用", () => {
+    const { exp, sc } = makeExp([input("a", "a", "1"), formula("f", "f", "a")]);
+    // 模拟接受改版：当前定义与已接受版本都变为自引用版本 v2。
+    exp.units = exp.units.map((u) => (u.id === "f" ? { ...u, version: 2, expression: "f + a" } : u));
+    recordFormulaHistory(exp, "f", 2, "f + a");
+    sc.acceptedFormulaVersions = { f: 2 };
+    const { ranges } = computeScenarioRanges(exp, sc.id, "accepted");
+    expect(ranges.f.status).toBe("indeterminate");
+    expect(ranges.f.reason).toContain("直接引用自身");
+  });
+
+  it("其他情景仍接受旧公式时：失效版本只影响已接受它的情景，旧版情景范围继续有效", () => {
+    const { exp, sc } = makeExp([input("a", "a", "1"), formula("f", "f", "a * 2")]);
+    const sc2 = makeScenario("S2", {}, sc.id, 2);
+    exp.scenarios[sc2.id] = sc2;
+    exp.scenarioOrder.push(sc2.id);
+    // f v2 变成自引用；sc2 接受 v2，sc 仍保持 v1。
+    exp.units = exp.units.map((u) => (u.id === "f" ? { ...u, version: 2, expression: "f + a" } : u));
+    recordFormulaHistory(exp, "f", 1, "a * 2");
+    recordFormulaHistory(exp, "f", 2, "f + a");
+    sc.acceptedFormulaVersions = { f: 1 };
+    sc2.acceptedFormulaVersions = { f: 2 };
+
+    expect(computeScenarioRanges(exp, sc.id, "accepted").ranges.f.status).toBe("proven");
+    const bad = computeScenarioRanges(exp, sc2.id, "accepted").ranges.f;
+    expect(bad.status).toBe("indeterminate");
+    expect(bad.reason).toContain("直接引用自身");
+  });
 });
 
 describe("情景比较归因", () => {

@@ -44,6 +44,8 @@ function refreshScenario(exp: Experiment, scenarioId: string, changedInputIds?: 
 }
 
 interface NotebookStore extends NotebookState {
+  /** 每次提交自增的修订号：状态对象常被原地修改，供 UI memo 识别变化。 */
+  rev: number;
   hydrate: () => void;
   createExperiment: (name: string) => string;
   selectExperiment: (id: string | null) => void;
@@ -77,7 +79,7 @@ interface NotebookStore extends NotebookState {
 export const useNotebook = create<NotebookStore>((set, get) => {
   function commit(next: NotebookState) {
     persist(next);
-    set({ ...next });
+    set({ ...next, rev: get().rev + 1 });
   }
 
   /** 深拷贝实验（快照/支线），结果仓按内容键重新装载并重新计数。 */
@@ -89,8 +91,9 @@ export const useNotebook = create<NotebookStore>((set, get) => {
 
   return {
     ...emptyNotebook(),
+    rev: 0,
 
-    hydrate: () => set(loadNotebook()),
+    hydrate: () => set({ ...loadNotebook(), rev: get().rev + 1 }),
 
     createExperiment: (name) => {
       const now = Date.now();

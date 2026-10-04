@@ -220,8 +220,31 @@ function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
   const removeReport = useNotebook((s) => s.removeReport);
   const [open, setOpen] = useState(false);
   const versionText = Object.entries(report.formulaVersions)
-    .map(([id, v]) => (report.unitNames[id] ?? id) + " v" + v)
+    .map(([id, v]) => {
+      const expr = report.formulaExpressions?.[id];
+      return (report.unitNames[id] ?? id) + " v" + v + (expr !== undefined ? `（${expr || "空表达式"}）` : "");
+    })
     .join("、");
+  const scOfReport = exp.scenarios[report.scenarioId];
+  const staleUnits = Object.entries(report.formulaVersions).filter(([id, v]) => {
+    const current = exp.units.find((u) => u.id === id);
+    if (!current) return true;
+    const acceptedNow = scOfReport?.acceptedFormulaVersions?.[id] ?? current.version;
+    return acceptedNow !== v;
+  });
+  const missingUnits = Object.keys(report.formulaVersions).filter((id) => !exp.units.some((u) => u.id === id));
+  const versionStaleUnits = staleUnits.filter(([id]) => !missingUnits.includes(id));
+  // 历史报告必须按保存时的快照解释：用报告自带的名称与范围重建展示单元，不引用当前定义。
+  const reportExp: Experiment = {
+    ...exp,
+    units: Object.values(report.ranges).map((r) => ({
+      id: r.unitId,
+      name: report.unitNames[r.unitId] ?? r.unitId,
+      kind: "formula" as const,
+      expression: report.formulaExpressions?.[r.unitId] ?? "",
+      version: report.formulaVersions[r.unitId] ?? 1,
+    })),
+  };
   return (
     <div className="report-card">
       <div className="report-head">
@@ -230,16 +253,26 @@ function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
         </button>
         <span className="hint">
           {new Date(report.createdAt).toLocaleString()} · {report.scenarioName} ·
-          {report.target === "pending" ? "预览视图" : "基线视图"}
+          {report.target === "pending" ? "预览视图快照" : "基线视图快照"}
         </span>
         <button className="danger tiny" onClick={() => removeReport(report.id)}>删除</button>
       </div>
-      <p className="hint">公式版本：{versionText || "无"}；约束与联合观测已随报告快照保存。</p>
+      <p className="hint">
+        <strong>历史报告（保存时的原版本快照，不是当前结果）</strong>。
+        公式版本：{versionText || "无"}；输入约束与联合观测已随报告快照保存，后续公式改版、接受新版本或修改约束都不会改变本报告。
+      </p>
+      {(versionStaleUnits.length > 0 || missingUnits.length > 0) && (
+        <p className="error-text">
+          注意：该报告对应的公式版本{missingUnits.length > 0 ? `（${missingUnits.map((id) => report.unitNames[id] ?? id).join("、")} 已删除）` : ""}
+          {versionStaleUnits.length > 0 ? `${missingUnits.length > 0 ? "；其他单元" : ""}已不是该情景当前接受的版本` : ""}，
+          下表仅反映保存时的原版本，不能当作当前范围。
+        </p>
+      )}
       {open && (
         <RangeTable
-          exp={{ ...exp, units: exp.units.map((u) => ({ ...u, name: report.unitNames[u.id] ?? u.name })) }}
+          exp={reportExp}
           ranges={report.ranges}
-          title="保存时的范围"
+          title="保存时的范围（历史快照）"
           totalCombos={report.totalCombos}
           truncated={report.truncated}
         />
@@ -250,6 +283,8 @@ function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
 
 export function UncertaintyPanel({ exp }: { exp: Experiment }) {
   const saveRangeReport = useNotebook((s) => s.saveRangeReport);
+  // 状态对象会被原地修改，rev 保证接受改版等操作后范围表/比较立即重算。
+  const rev = useNotebook((s) => s.rev);
   const scId = exp.activeScenarioId ?? exp.scenarioOrder[0];
   const sc = exp.scenarios[scId];
   const [compareA, setCompareA] = useState(exp.scenarioOrder[0] ?? "");
@@ -257,16 +292,19 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
 
   const accepted = useMemo(
     () => (sc ? computeScenarioRanges(exp, scId, "accepted") : null),
-    [exp, sc, scId],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [exp, sc, scId, rev],
   );
   const hasPending = sc ? pendingUnitIds(exp, sc).length > 0 : false;
   const pending = useMemo(
     () => (sc && hasPending ? computeScenarioRanges(exp, scId, "pending") : null),
-    [exp, sc, scId, hasPending],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [exp, sc, scId, hasPending, rev],
   );
   const comparisons = useMemo(
     () => (compareA && compareB && compareA !== compareB ? compareScenarios(exp, compareA, compareB) : []),
-    [exp, compareA, compareB],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [exp, compareA, compareB, rev],
   );
 
   if (!sc) return null;

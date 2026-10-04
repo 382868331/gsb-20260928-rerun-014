@@ -14,7 +14,7 @@ import {
   findCycles,
   topologicalOrder,
 } from "./engine";
-import { effectiveUnits, scenarioFormulaVersion } from "./scenarios";
+import { effectiveUnits, historicalExpression, scenarioFormulaVersion } from "./scenarios";
 import { uid } from "./storage";
 
 /** 组合枚举上限：超过则截断，范围降级为“可能”。 */
@@ -88,6 +88,11 @@ export function computeScenarioRanges(
 
   for (const id of cycleIds) reasons.set(id, `处于引用环：${membership.get(id)}`);
   for (const id of blockedIds) reasons.set(id, "上游处于引用环中，无法判断");
+
+  // 定义级错误（直接自引用、引用不存在、重名）：该单元任何组合都无法求值。
+  for (const [id, message] of graph.definitionErrors) {
+    if (!reasons.has(id)) reasons.set(id, message);
+  }
 
   // 输入源：联合组 / 候选集 / 区间 / 确定值。
   const sources: ComboSource[] = [];
@@ -295,8 +300,13 @@ export function buildRangeReport(
   const sc = exp.scenarios[scenarioId];
   const { ranges, totalCombos, truncated } = computeScenarioRanges(exp, scenarioId, target);
   const formulaVersions: Record<string, number> = {};
+  const formulaExpressions: Record<string, string> = {};
   for (const u of exp.units) {
-    if (u.kind === "formula") formulaVersions[u.id] = scenarioFormulaVersion(exp, sc, u.id, target);
+    if (u.kind === "formula") {
+      const v = scenarioFormulaVersion(exp, sc, u.id, target);
+      formulaVersions[u.id] = v;
+      formulaExpressions[u.id] = historicalExpression(exp, u.id, v);
+    }
   }
   return {
     id: uid("rp"),
@@ -306,6 +316,7 @@ export function buildRangeReport(
     scenarioName: sc.name,
     target,
     formulaVersions,
+    formulaExpressions,
     inputConstraints: structuredClone(sc.inputConstraints ?? {}),
     jointGroups: structuredClone(sc.jointGroups ?? []),
     params: { ...sc.params },

@@ -127,6 +127,8 @@ export interface RangeReport {
   target: "accepted" | "pending";
   /** 分析时各公式单元使用的版本。 */
   formulaVersions: Record<string, number>;
+  /** 分析时各公式单元实际使用的表达式原文（历史报告按原版本解释，不随后续改版变化）。 */
+  formulaExpressions?: Record<string, string>;
   /** 分析时的输入约束与参数覆盖快照。 */
   inputConstraints: Record<string, InputConstraint>;
   jointGroups: JointGroup[];

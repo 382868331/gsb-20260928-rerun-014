@@ -19,6 +19,33 @@ export interface JointGroup {
 }
 
 /**
+ * 线性关系约束：对相关输入施加线性（不）等式，如 "a + 2*b <= 10"。
+ * 只接受线性形式；含变量相乘/相除/乘方等非线性形式时无法证明，相关单元记为无法判断。
+ */
+export interface LinearRelation {
+  id: string;
+  /** 关系原文：左侧与右侧均为输入名的线性组合，中间为 <=、>=、=、<、> 之一。 */
+  expression: string;
+}
+
+/**
+ * 分段取值条件：目标输入的允许取值随依据输入分段切换——
+ * 依据输入 < 阈值时目标只能取 lower 中的值，否则只能取 upper 中的值。
+ */
+export interface PiecewiseCondition {
+  id: string;
+  /** 依据输入（分段条件看它的取值）。 */
+  driverId: string;
+  threshold: number;
+  /** 被限制的目标输入。 */
+  targetId: string;
+  /** 依据输入 < 阈值时目标允许取值。 */
+  lower: number[];
+  /** 依据输入 >= 阈值时目标允许取值。 */
+  upper: number[];
+}
+
+/**
  * 计算单元定义（被持久化的“输入侧”内容）。
  * input: value 是数字输入；formula: expression 引用其他单元名，如 a + b * 2。
  */
@@ -67,6 +94,10 @@ export interface Scenario {
   inputConstraints?: Record<string, InputConstraint>;
   /** 联合观测组：声明哪些输入来自同一次联合观测。 */
   jointGroups?: JointGroup[];
+  /** 线性关系约束：进一步收紧相关输入的可行组合。 */
+  linearRelations?: LinearRelation[];
+  /** 分段取值条件：目标输入的允许集合随依据输入分段切换。 */
+  piecewiseConditions?: PiecewiseCondition[];
   /** 已接受的当前结果：unitId -> 结果（结果体内容寻址存放在实验级 resultStore）。 */
   results: Record<string, UnitResult>;
   /** 已接受结果对应的内容键，用于结果仓引用计数。 */
@@ -130,11 +161,15 @@ export interface RangeReport {
   /** 分析时的输入约束与参数覆盖快照。 */
   inputConstraints: Record<string, InputConstraint>;
   jointGroups: JointGroup[];
+  linearRelations: LinearRelation[];
+  piecewiseConditions: PiecewiseCondition[];
   params: Record<string, string>;
   unitNames: Record<string, string>;
   ranges: Record<string, UnitRange>;
   totalCombos: number;
   truncated: boolean;
+  /** 通过联合约束过滤后的可行组合数（旧报告可能缺失）。 */
+  feasibleCombos?: number;
 }
 
 export interface Experiment {

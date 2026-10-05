@@ -2,6 +2,8 @@ import type {
   Experiment,
   InputConstraint,
   JointGroup,
+  LinearRelation,
+  PiecewiseCondition,
   RangeReport,
   Scenario,
   UnitRange,
@@ -21,6 +23,8 @@ import { uid } from "./storage";
 export const MAX_COMBOS = 20000;
 /** 区间未显式给采样点数时的默认采样点数（含端点）。 */
 export const DEFAULT_INTERVAL_SAMPLES = 5;
+/** 线性关系判定时的零容差。 */
+const REL_EPS = 1e-9;
 
 interface ComboSource {
   unitIds: string[];
@@ -47,6 +51,181 @@ function constraintRows(c: InputConstraint): number[][] | string {
   const samples = Number.isFinite(c.samples) && c.samples >= 2 ? c.samples : DEFAULT_INTERVAL_SAMPLES;
   return intervalRows(c.min, c.max, samples);
 }
+/** 线性形式：各输入名 -> 系数，加常数项。 */
+interface LinearForm {
+  coef: Map<string, number>;
+  constant: number;
+}
+
+function formConstant(v: number): LinearForm {
+  return { coef: new Map(), constant: v };
+}
+
+function addForm(a: LinearForm, b: LinearForm, sign: 1 | -1): LinearForm {
+  const coef = new Map(a.coef);
+  for (const [name, c] of b.coef) coef.set(name, (coef.get(name) ?? 0) + sign * c);
+  return { coef, constant: a.constant + sign * b.constant };
+}
+
+function scaleForm(a: LinearForm, k: number): LinearForm {
+  const coef = new Map<string, number>();
+  for (const [name, c] of a.coef) coef.set(name, c * k);
+  return { coef, constant: a.constant * k };
+}
+
+function isConstForm(a: LinearForm): boolean {
+  return [...a.coef.values()].every((c) => c === 0);
+}
+
+/**
+ * 解析线性形式：数字、输入名、+ - * / 与括号。
+ * 变量相乘/相除、除以变量、乘方等一律视为非线性并抛错——
+ * 非线性关系无法通过组合过滤证明边界，由上层记为无法判断。
+ */
+export function parseLinearForm(expression: string): LinearForm {
+  const tokens: { type: "num" | "name" | "op" | "lp" | "rp"; value: string }[] = [];
+  let i = 0;
+  while (i < expression.length) {
+    const ch = expression[i];
+    if (ch === " " || ch === "\t") { i++; continue; }
+    if (ch === "(") { tokens.push({ type: "lp", value: ch }); i++; continue; }
+    if (ch === ")") { tokens.push({ type: "rp", value: ch }); i++; continue; }
+    if ("+-*/".includes(ch)) { tokens.push({ type: "op", value: ch }); i++; continue; }
+    if (/[0-9.]/.test(ch)) {
+      let j = i + 1;
+      while (j < expression.length && /[0-9.eE]/.test(expression[j])) j++;
+      const raw = expression.slice(i, j);
+      if (Number.isNaN(Number(raw))) throw new Error("无法解析数字 " + raw);
+      tokens.push({ type: "num", value: raw });
+      i = j;
+      continue;
+    }
+    const m = /^[A-Za-z_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5]*/.exec(expression.slice(i));
+    if (m) {
+      tokens.push({ type: "name", value: m[0] });
+      i += m[0].length;
+      continue;
+    }
+    throw new Error("含非线性或无法解析的符号 " + ch);
+  }
+  if (tokens.length === 0) throw new Error("关系式为空");
+  let pos = 0;
+  const peek = () => tokens[pos];
+
+  function parseExpr(): LinearForm {
+    let left = parseTerm();
+    while (peek()?.type === "op" && (peek()!.value === "+" || peek()!.value === "-")) {
+      const op = tokens[pos++].value;
+      left = addForm(left, parseTerm(), op === "+" ? 1 : -1);
+    }
+    return left;
+  }
+  function parseTerm(): LinearForm {
+    let left = parseFactor();
+    while (peek()?.type === "op" && (peek()!.value === "*" || peek()!.value === "/")) {
+      const op = tokens[pos++].value;
+      const right = parseFactor();
+      if (op === "*") {
+        if (!isConstForm(left) && !isConstForm(right)) throw new Error("含变量相乘的非线性形式");
+        left = isConstForm(left) ? scaleForm(right, left.constant) : scaleForm(left, right.constant);
+      } else {
+        if (!isConstForm(right)) throw new Error("含除以变量的非线性形式");
+        if (right.constant === 0) throw new Error("关系式中除以零");
+        left = scaleForm(left, 1 / right.constant);
+      }
+    }
+    return left;
+  }
+  function parseFactor(): LinearForm {
+    let sign: 1 | -1 = 1;
+    if (peek()?.type === "op" && (peek()!.value === "+" || peek()!.value === "-")) {
+      if (tokens[pos++].value === "-") sign = -1;
+    }
+    const base = parsePrimary();
+    return sign === 1 ? base : scaleForm(base, -1);
+  }
+  function parsePrimary(): LinearForm {
+    const t = peek();
+    if (!t) throw new Error("关系式不完整");
+    if (t.type === "num") { pos++; return formConstant(Number(t.value)); }
+    if (t.type === "name") {
+      pos++;
+      const coef = new Map<string, number>();
+      coef.set(t.value, 1);
+      return { coef, constant: 0 };
+    }
+    if (t.type === "lp") {
+      pos++;
+      const v = parseExpr();
+      if (peek()?.type !== "rp") throw new Error("缺少右括号");
+      pos++;
+      return v;
+    }
+    throw new Error("意外的符号 " + t.value);
+  }
+
+  const form = parseExpr();
+  if (pos !== tokens.length) throw new Error("多余的符号 " + tokens[pos].value);
+  return form;
+}
+
+type RelationOp = "<=" | ">=" | "=" | "<" | ">";
+
+interface CompiledRelation {
+  /** 输入单元 id -> 系数（已把右侧移到左侧）。 */
+  coef: Map<string, number>;
+  constant: number;
+  op: RelationOp;
+}
+
+/** 解析 "lhs <= rhs" 形式的线性关系；非线性或引用未知输入时抛错。 */
+export function parseLinearRelation(
+  expression: string,
+  inputIdByName: Map<string, string>,
+): CompiledRelation {
+  const m = /^(.*?)(<=|>=|=|<|>)(.*)$/.exec(expression);
+  if (!m) throw new Error("缺少比较符（<=、>=、=、<、>）");
+  const lhs = parseLinearForm(m[1]);
+  const rhs = parseLinearForm(m[3]);
+  const diff = addForm(lhs, rhs, -1);
+  const coef = new Map<string, number>();
+  for (const [name, c] of diff.coef) {
+    if (c === 0) continue;
+    const id = inputIdByName.get(name);
+    if (!id) throw new Error("引用了不存在或非输入的单元 " + name);
+    coef.set(id, (coef.get(id) ?? 0) + c);
+  }
+  return { coef, constant: diff.constant, op: m[2] as RelationOp };
+}
+
+function relationHolds(rel: CompiledRelation, assignment: Map<string, number>): boolean {
+  let v = rel.constant;
+  for (const [id, c] of rel.coef) v += c * (assignment.get(id) ?? 0);
+  switch (rel.op) {
+    case "<=": return v <= REL_EPS;
+    case ">=": return v >= -REL_EPS;
+    case "<": return v < -REL_EPS;
+    case ">": return v > REL_EPS;
+    default: return Math.abs(v) <= REL_EPS;
+  }
+}
+
+interface CompiledPiecewise {
+  driverId: string;
+  threshold: number;
+  targetId: string;
+  lower: Set<number>;
+  upper: Set<number>;
+}
+
+function piecewiseHolds(pw: CompiledPiecewise, assignment: Map<string, number>): boolean {
+  const driver = assignment.get(pw.driverId);
+  const target = assignment.get(pw.targetId);
+  if (driver === undefined || target === undefined) return false;
+  const allowed = driver < pw.threshold ? pw.lower : pw.upper;
+  return allowed.has(target);
+}
+
 
 /** 输入单元在某情景下的有效确定值（参数覆盖优先，否则共享默认值）。 */
 export function effectiveInputText(exp: Experiment, sc: Scenario, unitId: string): string {
@@ -58,6 +237,10 @@ export interface RangeComputation {
   ranges: Record<string, UnitRange>;
   totalCombos: number;
   truncated: boolean;
+  /** 通过线性关系与分段条件过滤后的可行组合数。 */
+  feasibleCombos: number;
+  /** 被联合约束过滤掉的组合数。 */
+  infeasibleCombos: number;
 }
 
 /**
@@ -133,6 +316,58 @@ export function computeScenarioRanges(
       sources.push({ unitIds: [u.id], rows: [[v]] });
     }
   }
+
+  // 线性关系与分段取值条件：编译为组合过滤器；无法证明的约束（非线性、引用未知、
+  // 分段条件无效）按其涉及的输入向下游记为无法判断，绝不给出未证实的边界。
+  const relationFilters: CompiledRelation[] = [];
+  const piecewiseFilters: CompiledPiecewise[] = [];
+  const inputIdByName = new Map(
+    units.filter((u) => u.kind === "input").map((u) => [u.name, u.id] as const),
+  );
+  const markUnprovable = (involvedIds: string[], reason: string) => {
+    const targets = involvedIds.length > 0
+      ? affectedDownstream(involvedIds, graph)
+      : new Set(units.map((u) => u.id));
+    for (const id of targets) {
+      if (!reasons.has(id)) reasons.set(id, reason);
+    }
+  };
+
+  for (const rel of sc.linearRelations ?? []) {
+    try {
+      relationFilters.push(parseLinearRelation(rel.expression, inputIdByName));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const names = [...rel.expression.matchAll(/[A-Za-z_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5]*/g)].map((m) => m[0]);
+      const involved = names.map((n) => inputIdByName.get(n)).filter((id): id is string => !!id);
+      markUnprovable([...new Set(involved)], "联合约束无法证明：线性关系 \"" + rel.expression + "\" " + msg);
+    }
+  }
+
+  for (const pw of sc.piecewiseConditions ?? []) {
+    const driver = unitById.get(pw.driverId);
+    const target = unitById.get(pw.targetId);
+    const lower = (pw.lower ?? []).filter(Number.isFinite);
+    const upper = (pw.upper ?? []).filter(Number.isFinite);
+    const invalid = !driver || driver.kind !== "input" || !target || target.kind !== "input"
+      || !Number.isFinite(pw.threshold) || lower.length === 0 || upper.length === 0;
+    if (invalid) {
+      const involved = [pw.driverId, pw.targetId].filter((id) => unitById.has(id));
+      markUnprovable(involved, "联合约束无法证明：分段取值条件无效（依据/目标必须是输入单元，阈值有限且两段取值集非空）");
+      continue;
+    }
+    piecewiseFilters.push({
+      driverId: pw.driverId,
+      threshold: pw.threshold,
+      targetId: pw.targetId,
+      lower: new Set(lower),
+      upper: new Set(upper),
+    });
+  }
+
+  const comboFeasible = (assignment: Map<string, number>): boolean =>
+    relationFilters.every((rel) => relationHolds(rel, assignment))
+    && piecewiseFilters.every((pw) => piecewiseHolds(pw, assignment));
 
   // 无法判断沿依赖向下游传播。
   for (const id of order) {
@@ -236,11 +471,20 @@ export function computeScenarioRanges(
   // 笛卡尔积枚举（联合组按行整体出现），超过上限即截断。
   const assignment = new Map<string, number>();
   let count = 0;
+  let feasibleCombos = 0;
+  let infeasibleCombos = 0;
   const walk = (si: number): boolean => {
     if (count >= MAX_COMBOS) return false;
     if (si === sources.length) {
       count += 1;
-      runCombo(assignment);
+      // 联合约束过滤：只接受同时满足线性关系与分段条件的组合，
+      // 被过滤的组合绝不参与边界与见证，避免拼出违反约束的伪边界。
+      if (comboFeasible(assignment)) {
+        feasibleCombos += 1;
+        runCombo(assignment);
+      } else {
+        infeasibleCombos += 1;
+      }
       return true;
     }
     const s = sources[si];
@@ -251,6 +495,16 @@ export function computeScenarioRanges(
     return true;
   };
   walk(0);
+
+  // 约束不可行：枚举到的组合全部被线性关系/分段条件排除，任何边界都不可证实。
+  const hasJointFilters = relationFilters.length + piecewiseFilters.length > 0;
+  if (hasJointFilters && count > 0 && feasibleCombos === 0) {
+    for (const u of units) {
+      if (!reasons.has(u.id)) {
+        reasons.set(u.id, "联合约束无可行组合：线性关系/分段条件排除了全部输入取值，边界无法证实");
+      }
+    }
+  }
 
   const ranges: Record<string, UnitRange> = {};
   for (const u of units) {
@@ -287,7 +541,7 @@ export function computeScenarioRanges(
     };
   }
 
-  return { ranges, totalCombos, truncated };
+  return { ranges, totalCombos, truncated, feasibleCombos, infeasibleCombos };
 }
 
 /** 生成一份完整报告（含当时的约束与公式版本快照），可直接保存。 */
@@ -298,7 +552,7 @@ export function buildRangeReport(
   name?: string,
 ): RangeReport {
   const sc = exp.scenarios[scenarioId];
-  const { ranges, totalCombos, truncated } = computeScenarioRanges(exp, scenarioId, target);
+  const { ranges, totalCombos, truncated, feasibleCombos } = computeScenarioRanges(exp, scenarioId, target);
   const formulaVersions: Record<string, number> = {};
   for (const u of exp.units) {
     if (u.kind === "formula") formulaVersions[u.id] = scenarioFormulaVersion(exp, sc, u.id, target);
@@ -313,11 +567,14 @@ export function buildRangeReport(
     formulaVersions,
     inputConstraints: structuredClone(sc.inputConstraints ?? {}),
     jointGroups: structuredClone(sc.jointGroups ?? []),
+    linearRelations: structuredClone(sc.linearRelations ?? []),
+    piecewiseConditions: structuredClone(sc.piecewiseConditions ?? []),
     params: { ...sc.params },
     unitNames: Object.fromEntries(exp.units.map((u) => [u.id, u.name])),
     ranges,
     totalCombos,
     truncated,
+    feasibleCombos,
   };
 }
 
@@ -341,6 +598,8 @@ function inputSignature(exp: Experiment, sc: Scenario, unitId: string): string {
     p: effectiveInputText(exp, sc, unitId),
     c: sc.inputConstraints?.[unitId] ?? null,
     g: groups.map((g) => ({ u: g.unitIds, r: g.rows })),
+    lr: sc.linearRelations ?? [],
+    pw: sc.piecewiseConditions ?? [],
   });
 }
 

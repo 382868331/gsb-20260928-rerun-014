@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Experiment, InputConstraint, JointGroup, RangeReport, UnitRange } from "../core/types";
+import type { Experiment, InputConstraint, JointGroup, LinearRelation, PiecewiseCondition, RangeReport, UnitRange } from "../core/types";
 import { compareScenarios, computeScenarioRanges, effectiveInputText } from "../core/uncertainty";
 import { pendingUnitIds } from "../core/scenarios";
 import { uid } from "../core/storage";
@@ -21,12 +21,14 @@ function statusLabel(r: UnitRange): string {
   return "无法判断";
 }
 
-function RangeTable({ exp, ranges, title, totalCombos, truncated }: {
+function RangeTable({ exp, ranges, title, totalCombos, truncated, feasibleCombos, infeasibleCombos }: {
   exp: Experiment;
   ranges: Record<string, UnitRange>;
   title: string;
   totalCombos: number;
   truncated: boolean;
+  feasibleCombos?: number;
+  infeasibleCombos?: number;
 }) {
   const nameOf = (id: string) => exp.units.find((u) => u.id === id)?.name ?? id;
   return (
@@ -34,6 +36,8 @@ function RangeTable({ exp, ranges, title, totalCombos, truncated }: {
       <h3>{title}</h3>
       <p className="hint">
         共枚举 {totalCombos} 个输入组合{truncated ? "（超出上限已截断，范围降级为可能）" : ""}。
+        {infeasibleCombos !== undefined && infeasibleCombos > 0 &&
+          " 其中 " + infeasibleCombos + " 个组合被线性关系/分段条件排除，可行组合 " + (feasibleCombos ?? 0) + " 个。"}
       </p>
       <table className="unit-table">
         <thead>
@@ -216,6 +220,110 @@ function JointGroupEditor({ exp, scenarioId }: { exp: Experiment; scenarioId: st
   );
 }
 
+function LinearRelationEditor({ exp, scenarioId }: { exp: Experiment; scenarioId: string }) {
+  const sc = exp.scenarios[scenarioId];
+  const setLinearRelations = useNotebook((s) => s.setLinearRelations);
+  const relations = sc.linearRelations ?? [];
+  const update = (next: LinearRelation[]) => setLinearRelations(next);
+  return (
+    <div>
+      {relations.map((rel) => (
+        <div key={rel.id} className="constraint-row">
+          <input
+            key={rel.id + rel.expression}
+            className="mono relation-input"
+            defaultValue={rel.expression}
+            placeholder="如 a + 2*b <= 10（只支持线性关系）"
+            onBlur={(e) => {
+              const expression = e.target.value.trim();
+              if (expression === rel.expression) return;
+              update(relations.map((x) => (x.id === rel.id ? { ...x, expression } : x)));
+            }}
+          />
+          <button className="danger tiny" onClick={() => update(relations.filter((x) => x.id !== rel.id))}>删除</button>
+        </div>
+      ))}
+      <button
+        className="tiny"
+        onClick={() => update([...relations, { id: uid("lr"), expression: "" }])}
+      >
+        添加线性关系
+      </button>
+      <p className="hint">只接受线性形式；非线性关系无法证明，相关单元将记为无法判断。</p>
+    </div>
+  );
+}
+
+function PiecewiseEditor({ exp, scenarioId }: { exp: Experiment; scenarioId: string }) {
+  const sc = exp.scenarios[scenarioId];
+  const setPiecewiseConditions = useNotebook((s) => s.setPiecewiseConditions);
+  const conditions = sc.piecewiseConditions ?? [];
+  const inputs = exp.units.filter((u) => u.kind === "input");
+  const update = (next: PiecewiseCondition[]) => setPiecewiseConditions(next);
+  const parseValues = (text: string) => text.split(/[,，\s]+/).map(Number).filter((v) => Number.isFinite(v));
+  if (inputs.length === 0) return <p className="hint">还没有输入单元。</p>;
+  return (
+    <div>
+      {conditions.map((pw) => {
+        const patch = (part: Partial<PiecewiseCondition>) =>
+          update(conditions.map((x) => (x.id === pw.id ? { ...x, ...part } : x)));
+        return (
+          <div key={pw.id} className="constraint-row piecewise-row">
+            <span>当</span>
+            <select value={pw.driverId} onChange={(e) => patch({ driverId: e.target.value })}>
+              {inputs.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <span>&lt;</span>
+            <input
+              key={pw.id + "th" + pw.threshold}
+              className="mono interval-input tiny-input"
+              defaultValue={String(pw.threshold)}
+              onBlur={(e) => {
+                const threshold = Number(e.target.value);
+                if (Number.isFinite(threshold)) patch({ threshold });
+              }}
+            />
+            <span>时，</span>
+            <select value={pw.targetId} onChange={(e) => patch({ targetId: e.target.value })}>
+              {inputs.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <span>只能取</span>
+            <input
+              key={pw.id + "lo" + pw.lower.join(".")}
+              className="mono"
+              defaultValue={pw.lower.join(", ")}
+              placeholder="如 1, 2"
+              onBlur={(e) => patch({ lower: parseValues(e.target.value) })}
+            />
+            <span>；否则只能取</span>
+            <input
+              key={pw.id + "up" + pw.upper.join(".")}
+              className="mono"
+              defaultValue={pw.upper.join(", ")}
+              placeholder="如 3, 4"
+              onBlur={(e) => patch({ upper: parseValues(e.target.value) })}
+            />
+            <button className="danger tiny" onClick={() => update(conditions.filter((x) => x.id !== pw.id))}>删除</button>
+          </div>
+        );
+      })}
+      <button
+        className="tiny"
+        onClick={() => update([...conditions, {
+          id: uid("pw"),
+          driverId: inputs[0].id,
+          threshold: 0,
+          targetId: inputs[0].id,
+          lower: [0],
+          upper: [0],
+        }])}
+      >
+        添加分段取值条件
+      </button>
+    </div>
+  );
+}
+
 function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
   const removeReport = useNotebook((s) => s.removeReport);
   const [open, setOpen] = useState(false);
@@ -245,6 +353,7 @@ function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
           title="保存时的范围"
           totalCombos={report.totalCombos}
           truncated={report.truncated}
+          feasibleCombos={report.feasibleCombos}
         />
       )}
     </div>
@@ -253,6 +362,7 @@ function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
 
 export function UncertaintyPanel({ exp }: { exp: Experiment }) {
   const saveRangeReport = useNotebook((s) => s.saveRangeReport);
+  const adoptConstraintScheme = useNotebook((s) => s.adoptConstraintScheme);
   const scId = exp.activeScenarioId ?? exp.scenarioOrder[0];
   const sc = exp.scenarios[scId];
   const [compareA, setCompareA] = useState(exp.scenarioOrder[0] ?? "");
@@ -284,6 +394,12 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
       <h3>联合观测</h3>
       <JointGroupEditor exp={exp} scenarioId={scId} />
 
+      <h3>线性关系</h3>
+      <LinearRelationEditor exp={exp} scenarioId={scId} />
+
+      <h3>分段取值条件</h3>
+      <PiecewiseEditor exp={exp} scenarioId={scId} />
+
       {accepted && (
         <RangeTable
           exp={exp}
@@ -291,6 +407,8 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
           title={"已接受基线范围（" + sc.name + "）"}
           totalCombos={accepted.totalCombos}
           truncated={accepted.truncated}
+          feasibleCombos={accepted.feasibleCombos}
+          infeasibleCombos={accepted.infeasibleCombos}
         />
       )}
       {pending && (
@@ -300,6 +418,8 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
           title="待接受预览范围（新版本单独预览，接受前不影响基线）"
           totalCombos={pending.totalCombos}
           truncated={pending.truncated}
+          feasibleCombos={pending.feasibleCombos}
+          infeasibleCombos={pending.infeasibleCombos}
         />
       )}
 
@@ -324,6 +444,18 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
               {scenarios.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </div>
+          {compareA !== compareB && (
+            <p className="hint">
+              约束方案比较后需明确采用一份：
+              <button className="tiny" onClick={() => adoptConstraintScheme(compareA)}>
+                采用 {exp.scenarios[compareA]?.name} 的约束方案
+              </button>{" "}
+              <button className="tiny" onClick={() => adoptConstraintScheme(compareB)}>
+                采用 {exp.scenarios[compareB]?.name} 的约束方案
+              </button>
+              （只复制输入约束/联合观测/线性关系/分段条件到当前情景，公式版本仍各情景隔离）
+            </p>
+          )}
           {compareA === compareB ? (
             <p className="hint">请选择两个不同的情景。</p>
           ) : (

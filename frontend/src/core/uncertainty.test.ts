@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ComputeUnit, Experiment, Scenario } from "./types";
-import { compareScenarios, computeScenarioRanges } from "./uncertainty";
+import { compareScenarios, computeScenarioRanges, parseLinearRelation } from "./uncertainty";
 import { loadNotebook, makeScenario, recordFormulaHistory, saveNotebook, STORAGE_KEY } from "./storage";
 import { useNotebook } from "../store/useNotebook";
 
@@ -322,5 +322,225 @@ describe("派生继承与持久化", () => {
     expect(loadedSc.jointGroups).toEqual([]);
     expect(loaded.experiments[exp.id].reports).toEqual([]);
     saveNotebook(loaded);
+  });
+});
+
+describe("联合约束下的范围收紧", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useNotebook.setState({ experiments: {}, rootId: null, activeId: null });
+  });
+
+  /** 核对边界见证是满足全部线性关系与分段条件的真实可行组合。 */
+  function expectWitnessFeasible(
+    exp: Experiment,
+    sc: Scenario,
+    witness: Record<string, number> | undefined,
+  ) {
+    expect(witness).toBeDefined();
+    const idByName = new Map(exp.units.filter((u) => u.kind === "input").map((u) => [u.name, u.id]));
+    const valueOf = (id: string) => {
+      const name = exp.units.find((u) => u.id === id)?.name ?? id;
+      return witness![name];
+    };
+    for (const rel of sc.linearRelations ?? []) {
+      const compiled = parseLinearRelation(rel.expression, idByName);
+      let v = compiled.constant;
+      for (const [id, c] of compiled.coef) v += c * valueOf(id);
+      const ok = compiled.op === "<=" ? v <= 1e-9
+        : compiled.op === ">=" ? v >= -1e-9
+        : compiled.op === "<" ? v < -1e-9
+        : compiled.op === ">" ? v > 1e-9
+        : Math.abs(v) <= 1e-9;
+      expect(ok).toBe(true);
+    }
+    for (const pw of sc.piecewiseConditions ?? []) {
+      const allowed = valueOf(pw.driverId) < pw.threshold ? pw.lower : pw.upper;
+      expect(allowed).toContain(valueOf(pw.targetId));
+    }
+  }
+
+  it("线性关系收紧范围：边界可证实且见证满足关系，不拼出违反约束的伪边界", () => {
+    const { exp, sc } = makeExp([
+      input("a", "a", "0"),
+      input("b", "b", "0"),
+      formula("f", "f", "a + b"),
+      formula("g", "g", "a - b"),
+    ]);
+    sc.inputConstraints = {
+      a: { kind: "candidates", values: [0, 1, 2, 3, 4] },
+      b: { kind: "candidates", values: [0, 1, 2, 3, 4] },
+    };
+    sc.linearRelations = [{ id: "r1", expression: "a + b <= 4" }];
+
+    const { ranges, feasibleCombos, infeasibleCombos, truncated } = computeScenarioRanges(exp, sc.id);
+    expect(truncated).toBe(false);
+    expect(feasibleCombos).toBe(15);
+    expect(infeasibleCombos).toBe(10);
+    // 不做联合过滤时 f 的上界会是 8（a=4,b=4），该组合违反关系，不能作为边界。
+    expect(ranges.f.status).toBe("proven");
+    expect(ranges.f.min).toBe(0);
+    expect(ranges.f.max).toBe(4);
+    expect(ranges.g.min).toBe(-4);
+    expect(ranges.g.max).toBe(4);
+    expectWitnessFeasible(exp, sc, ranges.f.minWitness);
+    expectWitnessFeasible(exp, sc, ranges.f.maxWitness);
+    expectWitnessFeasible(exp, sc, ranges.g.minWitness);
+    expectWitnessFeasible(exp, sc, ranges.g.maxWitness);
+  });
+
+  it("分段取值条件：目标输入按依据输入分段取值，保存重开后结论一致", () => {
+    const { exp, sc } = makeExp([
+      input("a", "a", "0"),
+      input("b", "b", "0"),
+      formula("g", "g", "a * b"),
+    ]);
+    sc.inputConstraints = {
+      a: { kind: "candidates", values: [-1, 1] },
+      b: { kind: "candidates", values: [1, 2, 3, 4] },
+    };
+    sc.piecewiseConditions = [{
+      id: "p1",
+      driverId: "a",
+      threshold: 0,
+      targetId: "b",
+      lower: [1, 2],
+      upper: [3, 4],
+    }];
+
+    const { ranges, feasibleCombos, infeasibleCombos } = computeScenarioRanges(exp, sc.id);
+    expect(feasibleCombos).toBe(4);
+    expect(infeasibleCombos).toBe(4);
+    // 忽略分段条件时 a=-1,b=4 会给出 -4；该组合不可行，下界只能是 -2。
+    expect(ranges.g.status).toBe("proven");
+    expect(ranges.g.min).toBe(-2);
+    expect(ranges.g.max).toBe(4);
+    expectWitnessFeasible(exp, sc, ranges.g.minWitness);
+    expectWitnessFeasible(exp, sc, ranges.g.maxWitness);
+
+    saveNotebook({ experiments: { [exp.id]: exp }, rootId: exp.id, activeId: exp.id });
+    const loaded = loadNotebook();
+    const loadedSc = loaded.experiments[exp.id].scenarios[sc.id];
+    expect(loadedSc.piecewiseConditions).toHaveLength(1);
+    const re = computeScenarioRanges(loaded.experiments[exp.id], sc.id).ranges;
+    expect(re.g.min).toBe(-2);
+    expect(re.g.max).toBe(4);
+  });
+
+  it("约束不可行：所有组合被排除时保留未知范围与原因", () => {
+    const { exp, sc } = makeExp([
+      input("a", "a", "0"),
+      input("b", "b", "0"),
+      formula("f", "f", "a + b"),
+    ]);
+    sc.inputConstraints = {
+      a: { kind: "candidates", values: [1, 2] },
+      b: { kind: "candidates", values: [1, 2] },
+    };
+    sc.linearRelations = [{ id: "r1", expression: "a + b >= 10" }];
+    const { ranges, feasibleCombos } = computeScenarioRanges(exp, sc.id);
+    expect(feasibleCombos).toBe(0);
+    expect(ranges.f.status).toBe("indeterminate");
+    expect(ranges.f.reason).toContain("无可行组合");
+    expect(ranges.f.min).toBeUndefined();
+  });
+
+  it("非线性关系无法证明：相关单元无法判断并给出原因，无关单元不受影响", () => {
+    const { exp, sc } = makeExp([
+      input("a", "a", "1"),
+      input("b", "b", "1"),
+      input("c", "c", "3"),
+      formula("f", "f", "a + b"),
+      formula("h", "h", "c * 2"),
+    ]);
+    sc.linearRelations = [{ id: "r1", expression: "a * b <= 4" }];
+    const { ranges } = computeScenarioRanges(exp, sc.id);
+    expect(ranges.f.status).toBe("indeterminate");
+    expect(ranges.f.reason).toContain("非线性");
+    expect(ranges.f.min).toBeUndefined();
+    expect(ranges.h.status).toBe("proven");
+    expect(ranges.h.min).toBe(6);
+  });
+
+  it("跨零分母：除零区域保留失败计数；线性关系排除跨零区域后边界可证实", () => {
+    const { exp, sc } = makeExp([input("x", "x", "0"), formula("f", "f", "10 / x")]);
+    sc.inputConstraints = { x: { kind: "interval", min: -1, max: 1, samples: 3 } };
+    const before = computeScenarioRanges(exp, sc.id);
+    expect(before.ranges.f.status).toBe("possible");
+    expect(before.ranges.f.min).toBe(-10);
+    expect(before.ranges.f.max).toBe(10);
+    expect(before.ranges.f.failed).toBe(1);
+    expect(before.ranges.f.failureReasons?.join()).toContain("除数为零");
+
+    sc.linearRelations = [{ id: "r1", expression: "x >= 1" }];
+    const after = computeScenarioRanges(exp, sc.id);
+    expect(after.feasibleCombos).toBe(1);
+    expect(after.ranges.f.min).toBe(10);
+    expect(after.ranges.f.max).toBe(10);
+    expect(after.ranges.f.failed).toBe(0);
+    expectWitnessFeasible(exp, sc, after.ranges.f.minWitness);
+  });
+
+  it("搜索预算不足：截断后只能称为可能范围，不能称为完整边界", () => {
+    const values = Array.from({ length: 200 }, (_, i) => i + 1);
+    const { exp, sc } = makeExp([
+      input("a", "a", "1"),
+      input("b", "b", "1"),
+      formula("f", "f", "a + b"),
+    ]);
+    sc.inputConstraints = {
+      a: { kind: "candidates", values },
+      b: { kind: "candidates", values },
+    };
+    sc.linearRelations = [{ id: "r1", expression: "a + b >= 2" }];
+    const { ranges, truncated, feasibleCombos } = computeScenarioRanges(exp, sc.id);
+    expect(truncated).toBe(true);
+    expect(feasibleCombos).toBeLessThanOrEqual(20000);
+    expect(ranges.f.status).toBe("possible");
+    expect(ranges.f.status).not.toBe("proven");
+  });
+
+  it("约束方案比较后明确采用一份：只复制约束，公式版本各情景隔离", () => {
+    const store = () => useNotebook.getState();
+    store().hydrate();
+    store().createExperiment("方案比较");
+    const a = store().addUnit("input")!;
+    const b = store().addUnit("input")!;
+    const f = store().addUnit("formula")!;
+    const names = () => Object.fromEntries(store().active()!.units.map((u) => [u.id, u.name]));
+    store().updateUnit(f, { expression: names()[a] + " + " + names()[b] });
+    store().acceptAllScenarioUpdates();
+    const scA = store().active()!.activeScenarioId!;
+
+    // 方案 A：a,b ∈ {1,2} 且 a + b <= 2。
+    store().setInputConstraint(a, { kind: "candidates", values: [1, 2] });
+    store().setInputConstraint(b, { kind: "candidates", values: [1, 2] });
+    store().setLinearRelations([{ id: "lr1", expression: names()[a] + " + " + names()[b] + " <= 2" }]);
+    expect(computeScenarioRanges(store().active()!, scA).ranges[f].max).toBe(2);
+
+    // 方案 B：派生后改成另一套约束。
+    const scB = store().addScenario("方案B")!;
+    store().setLinearRelations([]);
+    store().setInputConstraint(b, { kind: "candidates", values: [5] });
+    expect(computeScenarioRanges(store().active()!, scB).ranges[f].max).toBe(7);
+
+    // 明确采用 A 的约束方案：B 的边界立即按 A 的约束收紧。
+    store().adoptConstraintScheme(scA);
+    const adopted = computeScenarioRanges(store().active()!, scB);
+    expect(adopted.ranges[f].max).toBe(2);
+    expect(adopted.infeasibleCombos).toBeGreaterThan(0);
+
+    // 公式改版只在 A 接受：两情景公式版本保持隔离，B 仍按旧公式计算。
+    store().selectScenario(scA);
+    store().updateUnit(f, { expression: names()[a] + " - " + names()[b] });
+    store().acceptScenarioUpdate(scA);
+    const exp = store().active()!;
+    const verA = exp.scenarios[scA].acceptedFormulaVersions[f];
+    const verB = exp.scenarios[scB].acceptedFormulaVersions[f];
+    expect(verB).toBeLessThan(verA);
+    expect(computeScenarioRanges(exp, scA).ranges[f].max).toBe(0);
+    const bRanges = computeScenarioRanges(exp, scB).ranges;
+    expect(bRanges[f].status).toBe("proven");
+    expect(bRanges[f].max).toBe(2);
   });
 });

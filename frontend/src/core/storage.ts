@@ -60,6 +60,8 @@ function restoreFormulaHistory(exp: Experiment): void {
     sc.pendingCycleUnitIds ??= [];
     sc.inputConstraints ??= {};
     sc.jointGroups ??= [];
+    sc.linearRelations ??= [];
+    sc.piecewiseConditions ??= [];
     const keys = [...Object.values(sc.resultKeys), ...Object.values(sc.pendingKeys).map((key) => key.replace(/^pn:/, ""))];
     for (const key of keys) {
       if (!key.startsWith("fo|")) continue;

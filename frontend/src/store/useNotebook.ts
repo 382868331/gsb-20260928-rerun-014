@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ComputeUnit, Experiment, InputConstraint, JointGroup, NotebookState } from "../core/types";
+import type { ComputeUnit, Experiment, InputConstraint, JointGroup, LinearRelation, NotebookState, PiecewiseCondition } from "../core/types";
 import { buildRangeReport } from "../core/uncertainty";
 import {
   cloneExperiment,
@@ -57,6 +57,12 @@ interface NotebookStore extends NotebookState {
   setInputConstraint: (unitId: string, constraint: InputConstraint | null) => void;
   /** 整体替换当前情景的联合观测组。 */
   setJointGroups: (groups: JointGroup[]) => void;
+  /** 整体替换当前情景的线性关系约束。 */
+  setLinearRelations: (relations: LinearRelation[]) => void;
+  /** 整体替换当前情景的分段取值条件。 */
+  setPiecewiseConditions: (conditions: PiecewiseCondition[]) => void;
+  /** 明确采用另一情景的约束方案（输入约束/联合观测/线性关系/分段条件），公式版本保持各情景隔离。 */
+  adoptConstraintScheme: (fromScenarioId: string) => void;
   /** 保存当前情景的范围分析报告（按当时的约束与公式版本快照）。 */
   saveRangeReport: (target: "accepted" | "pending", name?: string) => string | null;
   removeReport: (reportId: string) => void;
@@ -223,6 +229,45 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       commit({ ...get(), experiments: { ...get().experiments } });
     },
 
+    setLinearRelations: (relations) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      if (!scId) return;
+      exp.scenarios[scId].linearRelations = relations;
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
+    setPiecewiseConditions: (conditions) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      if (!scId) return;
+      exp.scenarios[scId].piecewiseConditions = conditions;
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
+    adoptConstraintScheme: (fromScenarioId) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      const from = exp.scenarios[fromScenarioId];
+      const current = scId ? exp.scenarios[scId] : undefined;
+      if (!from || !current || fromScenarioId === scId) return;
+      // 只采用约束方案；公式版本与已接受结果仍按各情景自己的版本隔离。
+      current.inputConstraints = structuredClone(from.inputConstraints ?? {});
+      current.jointGroups = structuredClone(from.jointGroups ?? []);
+      current.linearRelations = structuredClone(from.linearRelations ?? []);
+      current.piecewiseConditions = structuredClone(from.piecewiseConditions ?? []);
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
     saveRangeReport: (target, name) => {
       const state = get();
       if (!state.activeId) return null;
@@ -259,6 +304,8 @@ export const useNotebook = create<NotebookStore>((set, get) => {
             return { ...g, unitIds: keep.map((i) => g.unitIds[i]), rows: g.rows.map((r) => keep.map((i) => r[i])) };
           })
           .filter((g) => g.unitIds.length > 0);
+        sc.piecewiseConditions = (sc.piecewiseConditions ?? [])
+          .filter((pw) => pw.driverId !== id && pw.targetId !== id);
         delete sc.acceptedFormulaVersions[id];
         delete sc.pending[id];
         delete sc.pendingKeys[id];
@@ -292,6 +339,8 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         base ? structuredClone(base.jointGroups ?? []) : [],
       );
       if (base) sc.acceptedFormulaVersions = { ...base.acceptedFormulaVersions };
+      sc.linearRelations = base ? structuredClone(base.linearRelations ?? []) : [];
+      sc.piecewiseConditions = base ? structuredClone(base.piecewiseConditions ?? []) : [];
       exp.scenarios[sc.id] = sc;
       exp.scenarioOrder = [...exp.scenarioOrder, sc.id];
       exp.activeScenarioId = sc.id;

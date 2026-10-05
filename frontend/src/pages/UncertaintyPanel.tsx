@@ -1,9 +1,11 @@
 import { useState } from "react";
 import type { Experiment, InputConstraint, JointGroup, RangeReport, UnitRange } from "../core/types";
 import { compareScenarios, computeScenarioRanges, effectiveInputText } from "../core/uncertainty";
+import { compareConstraintSchemes } from "../core/uncertainty";
 import { pendingUnitIds } from "../core/scenarios";
 import { uid } from "../core/storage";
 import { useNotebook } from "../store/useNotebook";
+import { SchemeEditor } from "./SchemeEditor";
 
 function fmtNum(v: number | undefined): string {
   return v === undefined ? "—" : String(Math.round(v * 1e6) / 1e6);
@@ -21,12 +23,14 @@ function statusLabel(r: UnitRange): string {
   return "无法判断";
 }
 
-function RangeTable({ exp, ranges, title, totalCombos, truncated }: {
+function RangeTable({ exp, ranges, title, totalCombos, truncated, infeasible, schemeName }: {
   exp: Experiment;
   ranges: Record<string, UnitRange>;
   title: string;
   totalCombos: number;
   truncated: boolean;
+  infeasible?: number;
+  schemeName?: string | null;
 }) {
   const nameOf = (id: string) => exp.units.find((u) => u.id === id)?.name ?? id;
   return (
@@ -34,6 +38,9 @@ function RangeTable({ exp, ranges, title, totalCombos, truncated }: {
       <h3>{title}</h3>
       <p className="hint">
         共枚举 {totalCombos} 个输入组合{truncated ? "（超出上限已截断，范围降级为可能）" : ""}。
+        {schemeName
+          ? `采用约束方案 "${schemeName}"，排除 ${infeasible ?? 0} 个不满足方案的组合；边界组合均满足该方案。`
+          : ""}
       </p>
       <table className="unit-table">
         <thead>
@@ -237,6 +244,7 @@ function ReportCard({ exp, report }: { exp: Experiment; report: RangeReport }) {
       <p className="hint">
         历史快照（保存时的公式版本：{versionText || "无"}）；约束与联合观测已随报告冻结，
         后续改版或约束调整不影响本报告，也不代表当前结果。
+        {report.adoptedScheme ? `保存时采用约束方案 "${report.adoptedScheme.name}"。` : "保存时未采用约束方案。"}
       </p>
       {open && (
         <RangeTable
@@ -266,6 +274,7 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
   const comparisons = compareA && compareB && compareA !== compareB
     ? compareScenarios(exp, compareA, compareB)
     : [];
+  const schemeComparisons = sc ? compareConstraintSchemes(exp, scId) : [];
 
   if (!sc) return null;
   const scenarios = exp.scenarioOrder.map((id) => exp.scenarios[id]).filter(Boolean);
@@ -284,6 +293,46 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
       <h3>联合观测</h3>
       <JointGroupEditor exp={exp} scenarioId={scId} />
 
+      <h3>约束方案（线性关系 + 分段取值）</h3>
+      <p className="hint">
+        方案只作用于输入组合：满足全部线性关系与分段取值的组合才参与求界，
+        边界组合必为可行组合；无可行组合或方案无效时记为无法判断并给出原因。
+      </p>
+      <SchemeEditor exp={exp} scenarioId={scId} />
+
+      {schemeComparisons.length > 1 && (
+        <>
+          <h4>方案比较（同一情景、同一公式版本下逐方案重算）</h4>
+          <table className="unit-table">
+            <thead>
+              <tr>
+                <th>方案</th>
+                {exp.units.filter((u) => u.kind === "formula").map((u) => <th key={u.id}>{u.name}</th>)}
+                <th>排除组合</th>
+              </tr>
+            </thead>
+            <tbody>
+              {schemeComparisons.map((row) => (
+                <tr key={row.schemeId ?? "none"}>
+                  <td>{row.name}{row.adopted ? "（采用中）" : ""}</td>
+                  {exp.units.filter((u) => u.kind === "formula").map((u) => {
+                    const r = row.result.ranges[u.id];
+                    return (
+                      <td key={u.id} className="mono">
+                        {!r || r.status === "indeterminate"
+                          ? "无法判断"
+                          : `[${fmtNum(r.min)}, ${fmtNum(r.max)}]（${statusLabel(r)}）`}
+                      </td>
+                    );
+                  })}
+                  <td className="mono">{row.result.infeasible}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
       {accepted && (
         <RangeTable
           exp={exp}
@@ -291,6 +340,8 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
           title={"已接受基线范围（" + sc.name + "）"}
           totalCombos={accepted.totalCombos}
           truncated={accepted.truncated}
+          infeasible={accepted.infeasible}
+          schemeName={accepted.schemeName}
         />
       )}
       {pending && (
@@ -300,6 +351,8 @@ export function UncertaintyPanel({ exp }: { exp: Experiment }) {
           title="待接受预览范围（新版本单独预览，接受前不影响基线）"
           totalCombos={pending.totalCombos}
           truncated={pending.truncated}
+          infeasible={pending.infeasible}
+          schemeName={pending.schemeName}
         />
       )}
 

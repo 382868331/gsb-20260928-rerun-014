@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { ComputeUnit, Experiment, InputConstraint, JointGroup, NotebookState } from "../core/types";
+import type { ConstraintScheme } from "../core/types";
 import { buildRangeReport } from "../core/uncertainty";
 import {
   cloneExperiment,
@@ -57,6 +58,10 @@ interface NotebookStore extends NotebookState {
   setInputConstraint: (unitId: string, constraint: InputConstraint | null) => void;
   /** 整体替换当前情景的联合观测组。 */
   setJointGroups: (groups: JointGroup[]) => void;
+  /** 整体替换当前情景的候选约束方案（线性关系 + 分段取值）。 */
+  setConstraintSchemes: (schemes: ConstraintScheme[]) => void;
+  /** 明确采用当前情景的某份约束方案；null 表示不采用任何方案。 */
+  adoptConstraintScheme: (schemeId: string | null) => void;
   /** 保存当前情景的范围分析报告（按当时的约束与公式版本快照）。 */
   saveRangeReport: (target: "accepted" | "pending", name?: string) => string | null;
   removeReport: (reportId: string) => void;
@@ -223,6 +228,33 @@ export const useNotebook = create<NotebookStore>((set, get) => {
       commit({ ...get(), experiments: { ...get().experiments } });
     },
 
+    setConstraintSchemes: (schemes) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      if (!scId) return;
+      const sc = exp.scenarios[scId];
+      sc.constraintSchemes = schemes;
+      if (sc.adoptedSchemeId && !schemes.some((s) => s.id === sc.adoptedSchemeId)) {
+        sc.adoptedSchemeId = null;
+      }
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
+    adoptConstraintScheme: (schemeId) => {
+      const state = get();
+      if (!state.activeId) return;
+      const exp = state.experiments[state.activeId];
+      const scId = exp.activeScenarioId;
+      if (!scId) return;
+      const sc = exp.scenarios[scId];
+      sc.adoptedSchemeId = schemeId && (sc.constraintSchemes ?? []).some((s) => s.id === schemeId) ? schemeId : null;
+      exp.updatedAt = Date.now();
+      commit({ ...get(), experiments: { ...get().experiments } });
+    },
+
     saveRangeReport: (target, name) => {
       const state = get();
       if (!state.activeId) return null;
@@ -263,6 +295,20 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         delete sc.pending[id];
         delete sc.pendingKeys[id];
         delete sc.pendingFormulaVersions?.[id];
+        // 约束方案同步剔除被删单元，避免残留悬空引用。
+        sc.constraintSchemes = (sc.constraintSchemes ?? []).map((s) => ({
+          ...s,
+          linear: s.linear
+            .map((rel) => ({ ...rel, terms: rel.terms.filter((t) => t.unitId !== id) }))
+            .filter((rel) => rel.terms.length > 0),
+          piecewise: s.piecewise
+            .filter((pw) => pw.unitId !== id)
+            .map((pw) => ({
+              ...pw,
+              clauses: pw.clauses.filter((c) => c.when?.unitId !== id),
+            }))
+            .filter((pw) => pw.clauses.length > 0),
+        }));
       }
       delete exp.formulaHistory?.[id];
       for (const scId of exp.scenarioOrder) refreshScenario(exp, scId);
@@ -292,6 +338,10 @@ export const useNotebook = create<NotebookStore>((set, get) => {
         base ? structuredClone(base.jointGroups ?? []) : [],
       );
       if (base) sc.acceptedFormulaVersions = { ...base.acceptedFormulaVersions };
+      if (base) {
+        sc.constraintSchemes = structuredClone(base.constraintSchemes ?? []);
+        sc.adoptedSchemeId = base.adoptedSchemeId ?? null;
+      }
       exp.scenarios[sc.id] = sc;
       exp.scenarioOrder = [...exp.scenarioOrder, sc.id];
       exp.activeScenarioId = sc.id;

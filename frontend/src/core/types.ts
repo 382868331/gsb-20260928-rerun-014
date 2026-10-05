@@ -18,6 +18,48 @@ export interface JointGroup {
   rows: number[][];
 }
 
+export type LinearOp = "<=" | ">=" | "==";
+
+/** 线性关系中的一项：coef * 输入单元取值。 */
+export interface LinearTerm {
+  unitId: string;
+  coef: number;
+}
+
+/**
+ * 线性关系约束：sum(coef * 输入) op rhs。
+ * 只作用于输入单元的取值组合，用于在联合约束下收紧范围。
+ */
+export interface LinearRelation {
+  id: string;
+  terms: LinearTerm[];
+  op: LinearOp;
+  rhs: number;
+}
+
+/** 分段取值的一段：when 满足时该输入只能取 values；when 缺省为默认段。 */
+export interface PiecewiseClause {
+  when?: { unitId: string; op: LinearOp; value: number };
+  values: number[];
+}
+
+/** 分段取值条件：某输入的可取值随其他输入的取值分段变化。 */
+export interface PiecewiseCondition {
+  unitId: string;
+  clauses: PiecewiseClause[];
+}
+
+/**
+ * 约束方案：一组线性关系 + 分段取值条件，作为整体被比较与采用。
+ * 方案存放在情景内，各情景互不影响；被采用后参与范围收紧。
+ */
+export interface ConstraintScheme {
+  id: string;
+  name: string;
+  linear: LinearRelation[];
+  piecewise: PiecewiseCondition[];
+}
+
 /**
  * 计算单元定义（被持久化的“输入侧”内容）。
  * input: value 是数字输入；formula: expression 引用其他单元名，如 a + b * 2。
@@ -67,6 +109,10 @@ export interface Scenario {
   inputConstraints?: Record<string, InputConstraint>;
   /** 联合观测组：声明哪些输入来自同一次联合观测。 */
   jointGroups?: JointGroup[];
+  /** 候选约束方案：可比较多份并明确采用其中一份。 */
+  constraintSchemes?: ConstraintScheme[];
+  /** 当前采用的约束方案 id；空表示不采用任何方案。 */
+  adoptedSchemeId?: string | null;
   /** 已接受的当前结果：unitId -> 结果（结果体内容寻址存放在实验级 resultStore）。 */
   results: Record<string, UnitResult>;
   /** 已接受结果对应的内容键，用于结果仓引用计数。 */
@@ -130,6 +176,8 @@ export interface RangeReport {
   /** 分析时的输入约束与参数覆盖快照。 */
   inputConstraints: Record<string, InputConstraint>;
   jointGroups: JointGroup[];
+  /** 分析时采用的约束方案快照（未采用为 null）。 */
+  adoptedScheme?: ConstraintScheme | null;
   params: Record<string, string>;
   unitNames: Record<string, string>;
   ranges: Record<string, UnitRange>;

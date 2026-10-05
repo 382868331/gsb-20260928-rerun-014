@@ -6,6 +6,7 @@ import type {
   Scenario,
   UnitRange,
 } from "./types";
+import type { ConstraintScheme, LinearOp } from "./types";
 import { evaluate } from "./evaluator";
 import {
   affectedDownstream,
@@ -25,6 +26,84 @@ export const DEFAULT_INTERVAL_SAMPLES = 5;
 interface ComboSource {
   unitIds: string[];
   rows: number[][];
+}
+
+/** 情景当前采用的约束方案（未采用或 id 失效时为 null）。 */
+export function adoptedScheme(sc: Scenario): ConstraintScheme | null {
+  if (!sc.adoptedSchemeId) return null;
+  return (sc.constraintSchemes ?? []).find((s) => s.id === sc.adoptedSchemeId) ?? null;
+}
+
+const EQ_EPS = 1e-9;
+
+function compareOp(lhs: number, op: LinearOp, rhs: number): boolean {
+  if (op === "<=") return lhs <= rhs + EQ_EPS;
+  if (op === ">=") return lhs >= rhs - EQ_EPS;
+  return Math.abs(lhs - rhs) <= EQ_EPS;
+}
+
+/** 校验约束方案：引用的输入必须存在且为输入单元，系数/右端/取值必须为有效数字。 */
+export function validateConstraintScheme(
+  scheme: ConstraintScheme,
+  unitById: Map<string, { kind: string; name: string }>,
+): string[] {
+  const errors: string[] = [];
+  const refName = (id: string) => unitById.get(id)?.name ?? id;
+  const checkUnit = (id: string): string | null => {
+    const u = unitById.get(id);
+    if (!u) return `引用了不存在的单元 ${id}`;
+    if (u.kind !== "input") return `"${u.name}" 不是输入单元，不能参与约束`;
+    return null;
+  };
+  for (const rel of scheme.linear) {
+    if (rel.terms.length === 0) errors.push(`线性关系 ${rel.id} 没有任何项`);
+    if (!Number.isFinite(rel.rhs)) errors.push(`线性关系 ${rel.id} 的右端不是有效数字`);
+    for (const t of rel.terms) {
+      const bad = checkUnit(t.unitId);
+      if (bad) errors.push(`线性关系 ${rel.id} ${bad}`);
+      else if (!Number.isFinite(t.coef)) errors.push(`线性关系 ${rel.id} 中 "${refName(t.unitId)}" 的系数不是有效数字`);
+    }
+  }
+  for (const pw of scheme.piecewise) {
+    const bad = checkUnit(pw.unitId);
+    if (bad) errors.push(`分段取值 ${bad}`);
+    if (pw.clauses.length === 0) errors.push(`分段取值（${refName(pw.unitId)}）没有任何分段`);
+    for (const clause of pw.clauses) {
+      const values = (clause.values ?? []).filter((v) => Number.isFinite(v));
+      if (values.length === 0) errors.push(`分段取值（${refName(pw.unitId)}）存在空取值段`);
+      if (clause.when) {
+        const badWhen = checkUnit(clause.when.unitId);
+        if (badWhen) errors.push(`分段取值条件 ${badWhen}`);
+        else if (!Number.isFinite(clause.when.value)) errors.push("分段取值条件的比较值不是有效数字");
+      }
+    }
+  }
+  return errors;
+}
+
+/** 判断一个完整输入组合是否满足约束方案（线性关系 + 分段取值）。 */
+export function comboSatisfiesScheme(assignment: Map<string, number>, scheme: ConstraintScheme): boolean {
+  for (const rel of scheme.linear) {
+    let sum = 0;
+    for (const t of rel.terms) {
+      const v = assignment.get(t.unitId);
+      if (v === undefined) return false;
+      sum += t.coef * v;
+    }
+    if (!compareOp(sum, rel.op, rel.rhs)) return false;
+  }
+  for (const pw of scheme.piecewise) {
+    const v = assignment.get(pw.unitId);
+    if (v === undefined) return false;
+    const clause = pw.clauses.find((c) => {
+      if (!c.when) return true;
+      const other = assignment.get(c.when.unitId);
+      return other !== undefined && compareOp(other, c.when.op, c.when.value);
+    });
+    if (!clause) return false;
+    if (!clause.values.some((x) => Math.abs(x - v) <= EQ_EPS)) return false;
+  }
+  return true;
 }
 
 function intervalRows(min: number, max: number, samples: number): number[][] {
@@ -58,6 +137,15 @@ export interface RangeComputation {
   ranges: Record<string, UnitRange>;
   totalCombos: number;
   truncated: boolean;
+  /** 被采用约束方案排除的组合数（未采用方案时为 0）。 */
+  infeasible: number;
+  /** 本次计算采用的约束方案名（未采用为 null）。 */
+  schemeName: string | null;
+}
+
+export interface RangeOptions {
+  /** 显式指定约束方案（null 表示强制不采用）；缺省按情景已采用的方案。 */
+  scheme?: ConstraintScheme | null;
 }
 
 /**
@@ -71,6 +159,7 @@ export function computeScenarioRanges(
   exp: Experiment,
   scenarioId: string,
   target: "accepted" | "pending" = "accepted",
+  options: RangeOptions = {},
 ): RangeComputation {
   const sc = exp.scenarios[scenarioId];
   const units = effectiveUnits(exp, sc, target);
@@ -85,6 +174,23 @@ export function computeScenarioRanges(
   const unitById = new Map(units.map((u) => [u.id, u]));
   const nameOf = (id: string) => unitById.get(id)?.name ?? id;
   const reasons = new Map<string, string>();
+
+  // 约束方案：显式指定优先，否则用情景已采用的方案。
+  const scheme = options.scheme !== undefined ? options.scheme : adoptedScheme(sc);
+  const schemeErrors = scheme ? validateConstraintScheme(scheme, unitById) : [];
+  if (scheme && schemeErrors.length > 0) {
+    const ranges: Record<string, UnitRange> = {};
+    for (const u of units) {
+      ranges[u.id] = {
+        unitId: u.id,
+        status: "indeterminate",
+        evaluated: 0,
+        failed: 0,
+        reason: `约束方案 "${scheme.name}" 无效：${schemeErrors.join("；")}`,
+      };
+    }
+    return { ranges, totalCombos: 0, truncated: false, infeasible: 0, schemeName: scheme.name };
+  }
 
   for (const id of cycleIds) reasons.set(id, `处于引用环：${membership.get(id)}`);
   for (const id of blockedIds) reasons.set(id, "上游处于引用环中，无法判断");
@@ -236,10 +342,15 @@ export function computeScenarioRanges(
   // 笛卡尔积枚举（联合组按行整体出现），超过上限即截断。
   const assignment = new Map<string, number>();
   let count = 0;
+  let infeasible = 0;
   const walk = (si: number): boolean => {
     if (count >= MAX_COMBOS) return false;
     if (si === sources.length) {
       count += 1;
+      if (scheme && !comboSatisfiesScheme(assignment, scheme)) {
+        infeasible += 1;
+        return true;
+      }
       runCombo(assignment);
       return true;
     }
@@ -251,6 +362,15 @@ export function computeScenarioRanges(
     return true;
   };
   walk(0);
+
+  // 采用了约束方案但没有任何可行组合：全部单元无法判断，不能给出伪边界。
+  if (scheme && count > 0 && count === infeasible) {
+    for (const u of units) {
+      if (!reasons.has(u.id)) {
+        reasons.set(u.id, `约束方案 "${scheme.name}" 下无可行组合（${infeasible} 个组合均被排除）`);
+      }
+    }
+  }
 
   const ranges: Record<string, UnitRange> = {};
   for (const u of units) {
@@ -287,7 +407,7 @@ export function computeScenarioRanges(
     };
   }
 
-  return { ranges, totalCombos, truncated };
+  return { ranges, totalCombos, truncated, infeasible, schemeName: scheme?.name ?? null };
 }
 
 /** 生成一份完整报告（含当时的约束与公式版本快照），可直接保存。 */
@@ -313,6 +433,7 @@ export function buildRangeReport(
     formulaVersions,
     inputConstraints: structuredClone(sc.inputConstraints ?? {}),
     jointGroups: structuredClone(sc.jointGroups ?? []),
+    adoptedScheme: adoptedScheme(sc) ? structuredClone(adoptedScheme(sc)) : null,
     params: { ...sc.params },
     unitNames: Object.fromEntries(exp.units.map((u) => [u.id, u.name])),
     ranges,
@@ -322,6 +443,42 @@ export function buildRangeReport(
 }
 
 export type Attribution = "参数不确定性" | "公式修订" | "参数与公式兼有" | "定义一致";
+
+export interface SchemeComparison {
+  /** null 表示“不采用任何方案”的对照。 */
+  schemeId: string | null;
+  name: string;
+  adopted: boolean;
+  result: RangeComputation;
+}
+
+/**
+ * 比较同一情景下的各约束方案：逐方案独立重算范围（含“不采用方案”对照），
+ * 便于看清每份方案对边界的收紧效果，再明确采用其中一份。
+ */
+export function compareConstraintSchemes(
+  exp: Experiment,
+  scenarioId: string,
+  target: "accepted" | "pending" = "accepted",
+): SchemeComparison[] {
+  const sc = exp.scenarios[scenarioId];
+  if (!sc) return [];
+  const out: SchemeComparison[] = [{
+    schemeId: null,
+    name: "不采用方案",
+    adopted: !sc.adoptedSchemeId,
+    result: computeScenarioRanges(exp, scenarioId, target, { scheme: null }),
+  }];
+  for (const s of sc.constraintSchemes ?? []) {
+    out.push({
+      schemeId: s.id,
+      name: s.name,
+      adopted: sc.adoptedSchemeId === s.id,
+      result: computeScenarioRanges(exp, scenarioId, target, { scheme: s }),
+    });
+  }
+  return out;
+}
 
 export interface UnitComparison {
   unitId: string;
@@ -342,6 +499,11 @@ function inputSignature(exp: Experiment, sc: Scenario, unitId: string): string {
     c: sc.inputConstraints?.[unitId] ?? null,
     g: groups.map((g) => ({ u: g.unitIds, r: g.rows })),
   });
+}
+
+/** 情景级约束签名：采用的约束方案整体参与，方案不同即视为参数不确定性不同。 */
+function schemeSignature(sc: Scenario): string {
+  return JSON.stringify(adoptedScheme(sc) ?? null);
 }
 
 /**
@@ -386,12 +548,13 @@ export function compareScenarios(exp: Experiment, scenarioAId: string, scenarioB
       (id) => scenarioFormulaVersion(exp, scA, id, "accepted") !== scenarioFormulaVersion(exp, scB, id, "accepted"),
     );
     const paramsDiffer = inputIds.some((id) => inputSignature(exp, scA, id) !== inputSignature(exp, scB, id));
+    const constraintsDiffer = paramsDiffer || schemeSignature(scA) !== schemeSignature(scB);
 
-    const attribution: Attribution = formulasDiffer && paramsDiffer
+    const attribution: Attribution = formulasDiffer && constraintsDiffer
       ? "参数与公式兼有"
       : formulasDiffer
         ? "公式修订"
-        : paramsDiffer
+        : constraintsDiffer
           ? "参数不确定性"
           : "定义一致";
 
